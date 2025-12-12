@@ -1,0 +1,11 @@
+torch
+torchaudio
+transformers
+numpy
+scipy
+pyyaml
+tqdm
+soundfile
+vector-quantize-pytorch
+einops
+protobuf
