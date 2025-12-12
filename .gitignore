@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data and checkpoints (too large for git)
+data/
+checkpoints*/
+*.pt
+*.pth
+*.ckpt
+
+# Logs and generated files
+*.log
+*.wav
+*.m4a
+*.mp3
+*.flac
+*.png
+*.jpg
+*.jpeg
+
+# Environment
+.env
+.env.local
+uv.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Test outputs
+test_audio/
+spectrograms/
+inference_output/
