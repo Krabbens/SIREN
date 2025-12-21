@@ -1,0 +1,88 @@
+model:
+  # Feature Extractor
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  
+  # Quantizer Settings - IMPROVED with RVQ
+  quantizer_type: "rfsq"
+  fsq_levels: [3, 3, 3, 3, 3, 3, 3, 3]  # 8 dims, 3^8 = 6561 codes per level
+  rfsq_num_levels: 4  # 4 levels of residual quantization
+  
+  # Semantic Branch - LARGER DIMENSIONS
+  semantic:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 8         # Matches FSQ dim
+    temporal_compression: 4
+    vocab_size: 6561      # Matches 3^8
+    
+  # Prosody Branch - LARGER
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 8
+    temporal_compression: 8
+    vocab_size: 6561      # Matches 3^8
+    
+  # Speaker
+  speaker:
+    embedding_dim: 256
+    num_groups: 8
+    codes_per_group: 256
+    
+  # Entropy Coding
+  entropy:
+    enabled: true
+    lm_layers: 3
+    lm_dim: 256
+    lm_heads: 8
+    context_length: 128
+    
+  # Decoder (Fusion) - IMPROVED
+  decoder:
+    fusion_dim: 512
+    fusion_heads: 8
+    fusion_layers: 4
+    dropout: 0.1
+        
+  # Vocoder - Vocos V2
+  vocoder:
+    type: "vocos_v2"
+    dim: 512
+    num_convnext_layers: 8
+    num_res_blocks: 3
+
+training:
+  batch_size: 8         # Reduced for 24GB VRAM
+  learning_rate: 1e-4   # Reduced for stability
+  warmup_steps: 1000
+  max_steps: 50000       # Can use existing LJSpeech features
+  num_workers: 4
+  
+  # Discriminator warmup
+  discriminator_start_step: 3000
+  
+  # Loss weights
+  mel_weight: 45.0
+  stft_weight: 2.0
+  gan_weight: 1.0
+  fm_weight: 2.0
+  
+  # Logging
+  log_every: 100
+  eval_every: 1000
+  save_every: 500
+  
+data:
+  # Use existing LJSpeech data for quick start
+  train_manifest: "/home/sperm/diff/data/train.json"  
+  val_manifest: "/home/sperm/diff/data/val.json"
+  sample_rate: 16000
+  max_duration: 10.0
+  min_duration: 1.0
+  multi_speaker: false  # LJSpeech is single speaker
+
+audio:
+  sample_rate: 16000
+  hop_length: 320
