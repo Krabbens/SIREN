@@ -1,0 +1,96 @@
+model:
+  # Feature Extractor
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  
+  # Quantizer Settings - IMPROVED
+  quantizer_type: "rfsq"  # NEW: Residual FSQ
+  fsq_levels: [3, 3, 3, 3, 3, 3, 3, 3]  # 8 dims, 3^8 = 6561 codes per level
+  rfsq_num_levels: 4  # 4 levels of residual quantization
+  
+  # Semantic Branch - INCREASED DIMENSIONS
+  semantic:
+    input_dim: 768
+    hidden_dim: 256       # Increased from 128
+    output_dim: 8         # Increased from 4 - matches FSQ dim
+    temporal_compression: 4
+    vocab_size: 6561      # 3^8
+    
+  # Prosody Branch - INCREASED DIMENSIONS
+  prosody:
+    input_dim: 768
+    hidden_dim: 128       # Increased from 64
+    output_dim: 8         # Increased from 4 - matches FSQ dim
+    temporal_compression: 8
+    vocab_size: 6561
+    
+  # Speaker
+  speaker:
+    embedding_dim: 256
+    num_groups: 8
+    codes_per_group: 256
+    
+  # Entropy Coding
+  entropy:
+    enabled: true
+    lm_layers: 3
+    lm_dim: 256
+    lm_heads: 8
+    context_length: 128
+    
+  # Decoder (Fusion) - IMPROVED
+  decoder:
+    fusion_dim: 512       # Increased from 256
+    fusion_heads: 8       # Increased from 4
+    fusion_layers: 4      # Increased from 2
+    dropout: 0.1          # Reduced from 0.18
+        
+  # Vocoder - IMPROVED
+  vocoder:
+    type: "vocos_v2"
+    dim: 512             # Larger
+    num_convnext_layers: 8
+    num_res_blocks: 3
+
+training:
+  batch_size: 16
+  learning_rate: 2e-4     # Slightly lower for stability
+  warmup_steps: 2000      # Longer warmup
+  max_steps: 100000       # 10x more steps
+  num_workers: 8
+  
+  # NEW: Discriminator warmup
+  discriminator_start_step: 5000  # Don't train D for first 5K steps
+  
+  # VQ/FSQ specific
+  commitment_weight: 0.25
+  codebook_ema_decay: 0.99
+  
+  # Loss weights - REBALANCED
+  reconstruction_weight: 1.0
+  mel_weight: 45.0
+  stft_weight: 2.0        # Increased
+  gan_weight: 1.0
+  fm_weight: 2.0          # Feature matching
+  
+  # Logging
+  log_every: 100
+  eval_every: 1000
+  save_every: 500
+  
+data:
+  # Multi-speaker dataset
+  train_manifest: "/home/sperm/diff/data/libritts_train.json"  
+  val_manifest: "/home/sperm/diff/data/libritts_val.json"
+  sample_rate: 16000
+  max_duration: 10.0
+  min_duration: 1.0
+  
+  # NEW: Multi-speaker settings
+  multi_speaker: true
+  num_speakers: 2456      # LibriTTS train-clean-100 + train-clean-360
+
+audio:
+  sample_rate: 16000
+  hop_length: 320
