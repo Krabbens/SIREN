@@ -29,7 +29,7 @@ from ultra_low_bitrate_codec.training.losses import MultiResolutionSTFTLoss, dis
 # Configuration
 CONFIG_PATH = "/home/sperm/diff/ultra_low_bitrate_codec/configs/multispeaker.yaml"
 CHECKPOINT_DIR = "/home/sperm/diff/checkpoints_multispeaker"
-RESUME_STEP = 20000  # Resume from this step
+RESUME_STEP = 5000  # Resume from this step
 
 with open(CONFIG_PATH, 'r') as f:
     config = yaml.safe_load(f)
@@ -59,6 +59,10 @@ spk_pq = ProductQuantizer(
 entropy_model = EntropyModel(config).to(device)
 discriminator = HiFiGANDiscriminator().to(device)
 
+# CUDA optimization: torch.compile() for faster discriminator
+print("Compiling discriminator with torch.compile()...")
+discriminator = torch.compile(discriminator, mode='default')
+
 # Load checkpoints
 print("Loading checkpoints...")
 factorizer.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/factorizer_{RESUME_STEP}.pt", map_location=device))
@@ -67,7 +71,7 @@ sem_vq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/sem_rfsq_{RESUME_STEP}.pt",
 pro_vq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/pro_rfsq_{RESUME_STEP}.pt", map_location=device))
 spk_pq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/spk_pq_{RESUME_STEP}.pt", map_location=device))
 entropy_model.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/entropy_{RESUME_STEP}.pt", map_location=device))
-discriminator.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/discriminator_{RESUME_STEP}.pt", map_location=device))
+discriminator.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/discriminator_{RESUME_STEP}.pt", map_location=device), strict=False)
 print("Checkpoints loaded!")
 
 # Optimizers
@@ -79,7 +83,7 @@ optimizer = optim.AdamW(params, lr=1e-4, betas=(0.8, 0.99)) # Reduced LR for sta
 optimizer_d = optim.AdamW(discriminator.parameters(), lr=float(config['training']['learning_rate']), betas=(0.8, 0.99))
 
 max_steps = config['training']['max_steps']
-disc_start_step = 20000 # config['training'].get('discriminator_start_step', 5000) - Postponed to avoid hang/collapse
+disc_start_step = 5000  # Discriminator starts immediately (window caching fix applied)
 
 def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
     def lr_lambda(current_step):
@@ -95,12 +99,12 @@ scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=remaining_
 
 # Data
 train_ds = PrecomputedFeatureDataset(
-    feature_dir=config['data']['feature_dir'],
+    features_dir=config['data']['feature_dir'],
     manifest_path=config['data']['train_manifest'],
     max_frames=500
 )
 val_ds = PrecomputedFeatureDataset(
-    feature_dir=config['data']['feature_dir'],
+    features_dir=config['data']['feature_dir'],
     manifest_path=config['data']['val_manifest'],
     max_frames=500
 )
@@ -123,8 +127,9 @@ def validate(step):
     val_dl = DataLoader(val_ds, batch_size=4, shuffle=True, num_workers=2)
     total_mel, count = 0, 0
     with torch.no_grad():
-        for features, audio in val_dl:
-            features, audio = features.to(device), audio.to(device)
+        for batch in val_dl:
+            features = batch['features'].to(device)
+            audio = batch['audio'].to(device)
             if audio.dim() == 2: audio = audio.unsqueeze(1)
             sem, pro, spk = factorizer(features)
             sem_z, _, _ = sem_vq(sem)
@@ -152,8 +157,8 @@ log_file.write(f"\n=== Resumed from step {RESUME_STEP} ===\n")
 
 while steps < max_steps:
     for batch_idx, batch in enumerate(train_dl):
-        features, audio = batch
-        features, audio = features.to(device), audio.to(device)
+        features = batch['features'].to(device)
+        audio = batch['audio'].to(device)
         if audio.dim() == 2: audio = audio.unsqueeze(1)
         
         # Run Factorizer in FP32 to avoid overflow/Inf
@@ -172,11 +177,26 @@ while steps < max_steps:
         # Discriminator
         if steps >= disc_start_step:
             optimizer_d.zero_grad()
+            
+            # Optimization: Random Window Training
+            # Crop random 32k segment (~2s) for discriminator to save compute
+            # Generator produced full length, but we only discrim on patch
+            with torch.no_grad():
+                if audio.size(-1) > 32000:
+                    max_start = audio.size(-1) - 32000
+                    start = torch.randint(0, max_start, (1,)).item()
+                    audio_disc = audio[..., start:start+32000]
+                    audio_hat_disc = audio_hat[..., start:start+32000].detach()
+                else:
+                    audio_disc = audio
+                    audio_hat_disc = audio_hat.detach()
+            
             with torch.amp.autocast('cuda'):
-                mpd_res, mrd_res = discriminator(audio, audio_hat.detach())
+                mpd_res, mrd_res = discriminator(audio_disc, audio_hat_disc)
                 loss_d_mpd, _, _ = discriminator_loss(mpd_res[0], mpd_res[1])
                 loss_d_mrd, _, _ = discriminator_loss(mrd_res[0], mrd_res[1])
                 loss_d = loss_d_mpd + loss_d_mrd
+            
             scaler.scale(loss_d).backward()
             scaler.step(optimizer_d)
         else:
@@ -186,18 +206,30 @@ while steps < max_steps:
         optimizer.zero_grad()
         with torch.amp.autocast('cuda'):
             if steps >= disc_start_step:
-                mpd_res, mrd_res = discriminator(audio, audio_hat)
+                # Optimization: Random Window for Generator GAN loss
+                if audio.size(-1) > 32000:
+                    max_start = audio.size(-1) - 32000
+                    start_g = torch.randint(0, max_start, (1,)).item()
+                    audio_g = audio[..., start_g:start_g+32000]
+                    audio_hat_g = audio_hat[..., start_g:start_g+32000] # Gradient flows here
+                else:
+                    audio_g = audio
+                    audio_hat_g = audio_hat
+                    
+                mpd_res, mrd_res = discriminator(audio_g, audio_hat_g)
                 loss_g_mpd, _ = generator_loss(mpd_res[1])
                 loss_g_mrd, _ = generator_loss(mrd_res[1])
                 loss_gan = (loss_g_mpd + loss_g_mrd) * config['training'].get('gan_weight', 1.0)
             else:
                 loss_gan = torch.tensor(0.0, device=device)
             
+            # Reconstruction losses (STFT/Mel on FULL sequence for stability)
             sc_loss, mag_loss = mr_stft(audio_hat.squeeze(1), audio.squeeze(1))
             stft_loss = sc_loss + mag_loss
             mel_loss = F.l1_loss(mel_fn(audio), mel_fn(audio_hat))
             q_loss = sem_loss + pro_loss + spk_loss
             
+            # Bitrate estimation (approximate)
             bits_sem = sem_vq.get_total_bits_per_frame() * sem.shape[1]
             bits_pro = pro_vq.get_total_bits_per_frame() * pro.shape[1]
             bps = (bits_sem + bits_pro + 32) / (audio.shape[-1] / 16000)
