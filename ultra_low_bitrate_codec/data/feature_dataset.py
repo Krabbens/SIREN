@@ -9,6 +9,7 @@ from typing import Optional, Tuple, Dict, List
 import torch
 import torch.nn.functional as F
 import torchaudio
+import soundfile as sf
 from torch.utils.data import Dataset
 import numpy as np
 
@@ -70,9 +71,11 @@ class PrecomputedFeatureDataset(Dataset):
         if isinstance(data, dict):
             features = data.get('features', data.get('hidden_states', None))
             audio = data.get('audio', None)
+            audio_path = data.get('audio_path', None)
         else:
             features = data
             audio = None
+            audio_path = None
         
         if features is None:
             raise ValueError(f"Could not find features in {feature_path}")
@@ -81,25 +84,34 @@ class PrecomputedFeatureDataset(Dataset):
         if features.dim() == 3:
             features = features.squeeze(0)
         
+        # Load audio from audio_path if audio tensor not present
+        if audio is None and audio_path is not None:
+            audio = self._load_audio_from_path(audio_path)
+        
         # Truncate or pad to max_frames
         num_frames = features.shape[0]
+        start = 0
         if num_frames > self.max_frames:
             # Random crop
             start = random.randint(0, num_frames - self.max_frames)
             features = features[start:start + self.max_frames]
-            if audio is not None:
-                audio_start = start * self.hop_length
-                audio_len = self.max_frames * self.hop_length
-                audio = audio[audio_start:audio_start + audio_len]
         elif num_frames < self.max_frames:
             # Pad
             pad_frames = self.max_frames - num_frames
             features = F.pad(features, (0, 0, 0, pad_frames))
-            if audio is not None:
-                pad_samples = pad_frames * self.hop_length
-                audio = F.pad(audio, (0, pad_samples))
         
-        # Load audio if not in saved data
+        # Crop/pad audio to match features
+        if audio is not None:
+            audio_start = start * self.hop_length
+            audio_len = self.max_frames * self.hop_length
+            if audio.shape[-1] > audio_start + audio_len:
+                audio = audio[audio_start:audio_start + audio_len]
+            elif audio.shape[-1] < audio_len:
+                audio = F.pad(audio, (0, audio_len - audio.shape[-1]))
+            else:
+                audio = audio[:audio_len]
+        
+        # Fallback: try to load audio from feature path
         if audio is None:
             audio = self._load_audio_for_feature(feature_path)
         
@@ -122,6 +134,24 @@ class PrecomputedFeatureDataset(Dataset):
             'features': features,  # [max_frames, feature_dim]
             'audio': audio,        # [max_frames * hop_length]
         }
+    
+    def _load_audio_from_path(self, audio_path: str) -> Optional[torch.Tensor]:
+        """Load audio from a specific path using soundfile."""
+        if not os.path.exists(audio_path):
+            return None
+        try:
+            # Use soundfile for reliable loading
+            data, sr = sf.read(audio_path)
+            waveform = torch.from_numpy(data).float()
+            if sr != self.sample_rate:
+                waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
+            # Ensure 1D
+            if waveform.dim() > 1:
+                waveform = waveform.mean(dim=-1)  # Convert stereo to mono
+            return waveform
+        except Exception as e:
+            print(f"Warning: Failed to load audio from {audio_path}: {e}")
+            return None
     
     def _load_audio_for_feature(self, feature_path: Path) -> Optional[torch.Tensor]:
         """Try to load corresponding audio file."""
