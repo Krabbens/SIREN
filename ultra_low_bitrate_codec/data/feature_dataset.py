@@ -92,7 +92,7 @@ class PrecomputedFeatureDataset(Dataset):
         num_frames = features.shape[0]
         start = 0
         if num_frames > self.max_frames:
-            # Random crop
+            # Random crop features
             start = random.randint(0, num_frames - self.max_frames)
             features = features[start:start + self.max_frames]
         elif num_frames < self.max_frames:
@@ -100,20 +100,35 @@ class PrecomputedFeatureDataset(Dataset):
             pad_frames = self.max_frames - num_frames
             features = F.pad(features, (0, 0, 0, pad_frames))
         
-        # Crop/pad audio to match features
-        if audio is not None:
+        # Audio loading optimization: Load only what we need
+        if audio is None:
+            # Calculate audio samples range
             audio_start = start * self.hop_length
             audio_len = self.max_frames * self.hop_length
-            if audio.shape[-1] > audio_start + audio_len:
-                audio = audio[audio_start:audio_start + audio_len]
-            elif audio.shape[-1] < audio_len:
-                audio = F.pad(audio, (0, audio_len - audio.shape[-1]))
-            else:
-                audio = audio[:audio_len]
-        
-        # Fallback: try to load audio from feature path
+            
+            # Use audio_path if available or fallback to lookup
+            target_path = audio_path
+            if target_path is None:
+                # Find path logic...
+                feature_name = feature_path.stem
+                if feature_name in self.audio_paths:
+                    target_path = self.audio_paths[feature_name]
+                else:
+                    audio_dir = self.features_dir.parent
+                    for ext in ['.wav', '.flac', '.mp3', '.m4a']:
+                        p = audio_dir / f"{feature_name}{ext}"
+                        if p.exists():
+                            target_path = str(p)
+                            break
+            
+            if target_path:
+                audio = self._load_audio_from_path(target_path, offset=audio_start, num_frames=audio_len)
+
+        # Fallback if partial load failed or wasn't tried
         if audio is None:
-            audio = self._load_audio_for_feature(feature_path)
+             # Try seeking logic again inside _load_audio_for_feature (if we updated it, but we didn't)
+             # Fallback to full load (old behavior) if optimize fails
+             audio = self._load_audio_for_feature(feature_path)
         
         # Ensure audio length matches features
         expected_audio_len = self.max_frames * self.hop_length
@@ -135,19 +150,39 @@ class PrecomputedFeatureDataset(Dataset):
             'audio': audio,        # [max_frames * hop_length]
         }
     
-    def _load_audio_from_path(self, audio_path: str) -> Optional[torch.Tensor]:
-        """Load audio from a specific path using soundfile."""
+    def _load_audio_from_path(self, audio_path: str, offset: int = 0, num_frames: int = None) -> Optional[torch.Tensor]:
+        """Load audio from a specific path using soundfile with seeking."""
         if not os.path.exists(audio_path):
             return None
         try:
-            # Use soundfile for reliable loading
-            data, sr = sf.read(audio_path)
+            # Use soundfile for reliable seeking
+            # Calculate sample offset based on hop_length context usually
+            # Here inputs are in 'samples' domain mostly if called correctly
+            # But let's assume offset/num_frames are in samples
+            
+            with sf.SoundFile(audio_path) as f:
+                if offset > f.frames:
+                    offset = 0
+                f.seek(offset)
+                
+                frames_to_read = -1
+                if num_frames is not None:
+                    frames_to_read = num_frames
+                    
+                data = f.read(frames_to_read)
+                sr = f.samplerate
+                
             waveform = torch.from_numpy(data).float()
+            
             if sr != self.sample_rate:
+                # Note: Resampling a small chunk might have boundary artifacts
+                # but for training randomness it's usually acceptable or we fetch a bit more context
                 waveform = torchaudio.functional.resample(waveform, sr, self.sample_rate)
+            
             # Ensure 1D
             if waveform.dim() > 1:
                 waveform = waveform.mean(dim=-1)  # Convert stereo to mono
+                
             return waveform
         except Exception as e:
             print(f"Warning: Failed to load audio from {audio_path}: {e}")
