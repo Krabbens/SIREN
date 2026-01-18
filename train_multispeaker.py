@@ -115,13 +115,13 @@ scheduler_d = get_linear_schedule_with_warmup(optimizer_d, warmup_steps, max_ste
 print("\n📊 Loading datasets...")
 
 train_ds = PrecomputedFeatureDataset(
-    feature_dir=config['data']['feature_dir'],
+    features_dir=config['data']['feature_dir'],
     manifest_path=config['data']['train_manifest'],
     max_frames=500
 )
 
 val_ds = PrecomputedFeatureDataset(
-    feature_dir=config['data']['feature_dir'],
+    features_dir=config['data']['feature_dir'],
     manifest_path=config['data']['val_manifest'],
     max_frames=500
 )
