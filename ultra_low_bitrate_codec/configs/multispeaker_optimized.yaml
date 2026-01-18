@@ -1,0 +1,98 @@
+model:
+  # Feature Extractor
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  
+  # Quantizer Settings - IMPROVED
+  quantizer_type: "rfsq"  # Residual FSQ
+  fsq_levels: [3, 3, 3, 3, 3, 3, 3, 3]  # 8 dims, 3^8 = 6561 codes per level
+  rfsq_num_levels: 4  # 4 levels of residual quantization
+  
+  # Semantic Branch
+  semantic:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 8
+    temporal_compression: 4
+    vocab_size: 6561
+    
+  # Prosody Branch
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 8
+    temporal_compression: 8
+    vocab_size: 6561
+    
+  # Speaker
+  speaker:
+    embedding_dim: 256
+    num_groups: 8
+    codes_per_group: 256
+    
+  # Entropy Coding
+  entropy:
+    enabled: true
+    lm_layers: 3
+    lm_dim: 256
+    lm_heads: 8
+    context_length: 128
+    
+  # Decoder (Fusion)
+  decoder:
+    fusion_dim: 512
+    fusion_heads: 8
+    fusion_layers: 4
+    dropout: 0.1
+        
+  # Vocoder
+  vocoder:
+    type: "vocos_v2"
+    dim: 512
+    num_convnext_layers: 8
+    num_res_blocks: 3
+
+training:
+  batch_size: 32
+  learning_rate: 2e-4
+  warmup_steps: 2000
+  max_steps: 100000
+  num_workers: 16
+  persistent_workers: true
+  
+  # Discriminator warmup
+  discriminator_start_step: 5000
+  
+  # VQ/FSQ specific
+  commitment_weight: 0.25
+  codebook_ema_decay: 0.99
+  
+  # Loss weights
+  reconstruction_weight: 1.0
+  mel_weight: 45.0
+  stft_weight: 2.0
+  gan_weight: 1.0
+  fm_weight: 2.0
+  
+  # Logging
+  log_every: 100
+  eval_every: 3000
+  save_every: 3000
+  
+data:
+  # Multi-speaker dataset: LibriTTS + MLS Polish
+  train_manifest: "/home/sperm/diff/data/multispeaker_manifest_train.json"
+  val_manifest: "/home/sperm/diff/data/multispeaker_manifest_val.json"
+  feature_dir: "/home/sperm/diff/data/features_multispeaker"
+  sample_rate: 16000
+  max_duration: 15.0
+  min_duration: 1.0
+  
+  # Multi-speaker settings
+  multi_speaker: true
+  num_speakers: -1  # Auto-detect from data
+
+audio:
+  sample_rate: 16000
+  hop_length: 320
