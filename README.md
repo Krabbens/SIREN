@@ -1,4 +1,6 @@
-# Ultra-Low Bitrate Speech Codec
+# SIREN 🔊
+
+**S**emantic **I**nformation **R**epresentation for **E**fficient **N**eural-coding
 
 A neural speech codec achieving **~68 bps** (bits per second) through advanced information factorization and residual finite scalar quantization.
 
@@ -40,8 +42,8 @@ A neural speech codec achieving **~68 bps** (bits per second) through advanced i
 
 ```bash
 # Clone the repository
-git clone https://github.com/Krabbens/ultra-low-bitrate-codec.git
-cd ultra-low-bitrate-codec
+git clone https://github.com/Krabbens/SIREN.git
+cd SIREN
 
 # Create virtual environment
 python -m venv .venv
@@ -105,7 +107,7 @@ python resume_multispeaker.py --checkpoint checkpoints_multispeaker/step_5000.pt
 ## 📁 Project Structure
 
 ```
-ultra-low-bitrate-codec/
+SIREN/
 ├── ultra_low_bitrate_codec/
 │   ├── models/
 │   │   ├── encoder.py          # InformationFactorizer
@@ -153,7 +155,7 @@ Key parameters in config files:
 |-------|---------|-----------------|
 | Opus (reference) | 6000 bps | 4.0 |
 | Lyra v2 | 3200 bps | 3.8 |
-| **Ours** | **68 bps** | 3.2* |
+| **SIREN** | **68 bps** | 3.2* |
 
 *Subjective evaluation pending
 

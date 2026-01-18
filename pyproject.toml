@@ -1,7 +1,7 @@
 [project]
-name = "ultra-low-bitrate-codec"
+name = "siren-codec"
 version = "0.1.0"
-description = "Ultra-low bitrate speech codec (~68 bps)"
+description = "SIREN: Semantic Information Representation for Efficient Neural-coding (~68 bps speech codec)"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.0.0",
