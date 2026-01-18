@@ -165,9 +165,9 @@ def validate(step):
     count = 0
     
     with torch.no_grad():
-        for features, audio in val_dl:
-            features = features.to(device)
-            audio = audio.to(device)
+        for batch in val_dl:
+            features = batch['features'].to(device)
+            audio = batch['audio'].to(device)
             if audio.dim() == 2:
                 audio = audio.unsqueeze(1)
             
@@ -213,9 +213,8 @@ log_file.flush()
 
 while steps < max_steps:
     for batch in train_dl:
-        features, audio = batch
-        features = features.to(device)
-        audio = audio.to(device)
+        features = batch['features'].to(device)
+        audio = batch['audio'].to(device)
         
         if audio.dim() == 2:
             audio = audio.unsqueeze(1)
