@@ -59,9 +59,8 @@ spk_pq = ProductQuantizer(
 entropy_model = EntropyModel(config).to(device)
 discriminator = HiFiGANDiscriminator().to(device)
 
-# CUDA optimization: torch.compile() for faster discriminator
-print("Compiling discriminator with torch.compile()...")
-discriminator = torch.compile(discriminator, mode='default')
+# CUDA optimization: torch.compile() moved after loading checkpoints
+
 
 # Load checkpoints
 print("Loading checkpoints...")
@@ -73,6 +72,12 @@ spk_pq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/spk_pq_{RESUME_STEP}.pt", m
 entropy_model.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/entropy_{RESUME_STEP}.pt", map_location=device))
 discriminator.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/discriminator_{RESUME_STEP}.pt", map_location=device), strict=False)
 print("Checkpoints loaded!")
+
+# CUDA optimization: torch.compile() for faster training
+# print("Compiling models with torch.compile()...")
+# discriminator = torch.compile(discriminator, mode='reduce-overhead')
+# factorizer = torch.compile(factorizer, mode='reduce-overhead')
+# decoder = torch.compile(decoder, mode='reduce-overhead')
 
 # Optimizers
 params = list(factorizer.parameters()) + list(decoder.parameters()) + \
@@ -100,7 +105,7 @@ scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=remaining_
 # Data
 train_ds = PrecomputedFeatureDataset(
     features_dir=config['data']['feature_dir'],
-    manifest_path=config['data']['train_manifest'],
+    manifest_path="/home/sperm/diff/data/optimized_manifest.json", # Force new manifest
     max_frames=500
 )
 val_ds = PrecomputedFeatureDataset(
@@ -111,6 +116,9 @@ val_ds = PrecomputedFeatureDataset(
 train_dl = DataLoader(train_ds, batch_size=config['training']['batch_size'], shuffle=True,
                       num_workers=config['training']['num_workers'], pin_memory=True,
                       persistent_workers=True, prefetch_factor=4)
+val_dl = DataLoader(val_ds, batch_size=4, shuffle=True,
+                    num_workers=config['training']['num_workers'], pin_memory=True,
+                    persistent_workers=True, prefetch_factor=4)
 
 # Losses
 mr_stft = MultiResolutionSTFTLoss().to(device)
@@ -124,18 +132,22 @@ def mel_fn(y):
 def validate(step):
     factorizer.eval()
     decoder.eval()
-    val_dl = DataLoader(val_ds, batch_size=4, shuffle=True, num_workers=2)
+    # val_dl is now global
     total_mel, count = 0, 0
     with torch.no_grad():
         for batch in val_dl:
             features = batch['features'].to(device)
             audio = batch['audio'].to(device)
             if audio.dim() == 2: audio = audio.unsqueeze(1)
-            sem, pro, spk = factorizer(features)
-            sem_z, _, _ = sem_vq(sem)
-            pro_z, _, _ = pro_vq(pro)
-            spk_z, _, _ = spk_pq(spk)
-            audio_hat = decoder(sem_z, pro_z, spk_z)
+            
+            # Extend autocast to cover all model parts
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                sem, pro, spk = factorizer(features)
+                sem_z, _, _ = sem_vq(sem)
+                pro_z, _, _ = pro_vq(pro)
+                spk_z, _, _ = spk_pq(spk)
+                audio_hat = decoder(sem_z, pro_z, spk_z)
+                
             if audio_hat.dim() == 2: audio_hat = audio_hat.unsqueeze(1)
             min_len = min(audio.shape[-1], audio_hat.shape[-1])
             mel_loss = F.l1_loss(mel_fn(audio[..., :min_len]), mel_fn(audio_hat[..., :min_len]))
@@ -161,11 +173,11 @@ while steps < max_steps:
         audio = batch['audio'].to(device)
         if audio.dim() == 2: audio = audio.unsqueeze(1)
         
-        # Run Factorizer in FP32 to avoid overflow/Inf
-        with torch.amp.autocast('cuda', enabled=False):
-            sem, pro, spk = factorizer(features.float())
+        # Run Factorizer in BFloat16 (better than FP32 for stability/speed on Ampere)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            sem, pro, spk = factorizer(features)
             
-        with torch.amp.autocast('cuda'):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             sem_z, sem_loss, _ = sem_vq(sem)
             pro_z, pro_loss, _ = pro_vq(pro)
             spk_z, spk_loss, _ = spk_pq(spk)
@@ -191,7 +203,7 @@ while steps < max_steps:
                     audio_disc = audio
                     audio_hat_disc = audio_hat.detach()
             
-            with torch.amp.autocast('cuda'):
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 mpd_res, mrd_res = discriminator(audio_disc, audio_hat_disc)
                 loss_d_mpd, _, _ = discriminator_loss(mpd_res[0], mpd_res[1])
                 loss_d_mrd, _, _ = discriminator_loss(mrd_res[0], mrd_res[1])
@@ -204,7 +216,7 @@ while steps < max_steps:
         
         # Generator
         optimizer.zero_grad()
-        with torch.amp.autocast('cuda'):
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
             if steps >= disc_start_step:
                 # Optimization: Random Window for Generator GAN loss
                 if audio.size(-1) > 32000:
