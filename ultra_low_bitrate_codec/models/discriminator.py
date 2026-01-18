@@ -43,7 +43,8 @@ class DiscriminatorP(nn.Module):
 class MultiPeriodDiscriminator(nn.Module):
     def __init__(self, use_spectral_norm=False):
         super(MultiPeriodDiscriminator, self).__init__()
-        periods = [2, 3, 5, 7, 11]
+        # Optimization: Reduced periods from [2, 3, 5, 7, 11] to [2, 3, 5] for speed
+        periods = [2, 3, 5]
         
         discs = [DiscriminatorP(i, use_spectral_norm=use_spectral_norm) for i in periods]
         self.discriminators = nn.ModuleList(discs)
@@ -115,6 +116,10 @@ class MultiResolutionDiscriminator(nn.Module):
         self.discriminators = nn.ModuleList(
             [DiscriminatorR(res) for res in self.resolutions]
         )
+        
+        # Pre-cache windows as buffers (avoids allocation on every forward pass)
+        for i, (n_fft, hop_length, win_length) in enumerate(self.resolutions):
+            self.register_buffer(f'window_{i}', torch.hann_window(win_length))
 
     def forward(self, y, y_hat):
         y_d_rs = []
@@ -124,10 +129,11 @@ class MultiResolutionDiscriminator(nn.Module):
         
         for i, d in enumerate(self.discriminators):
             n_fft, hop_length, win_length = self.resolutions[i]
+            window = getattr(self, f'window_{i}')
             
-            # STFT
-            y_stft = torch.stft(y.squeeze(1), n_fft, hop_length, win_length, return_complex=True, window=torch.hann_window(win_length).to(y.device))
-            y_hat_stft = torch.stft(y_hat.squeeze(1), n_fft, hop_length, win_length, return_complex=True, window=torch.hann_window(win_length).to(y_hat.device))
+            # STFT (using cached window)
+            y_stft = torch.stft(y.squeeze(1), n_fft, hop_length, win_length, return_complex=True, window=window)
+            y_hat_stft = torch.stft(y_hat.squeeze(1), n_fft, hop_length, win_length, return_complex=True, window=window)
             
             y_mag = torch.abs(y_stft).unsqueeze(1)
             y_hat_mag = torch.abs(y_hat_stft).unsqueeze(1) # (B, 1, F, T)
