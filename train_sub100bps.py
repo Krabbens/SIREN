@@ -118,7 +118,7 @@ params = list(factorizer.parameters()) + list(decoder.parameters()) + \
          list(sem_vq.parameters()) + list(pro_vq.parameters()) + \
          list(spk_pq.parameters()) + list(entropy_model.parameters())
 
-optimizer = optim.AdamW(params, lr=config['training']['learning_rate'], betas=(0.8, 0.99))
+optimizer = optim.AdamW(params, lr=float(config['training']['learning_rate']), betas=(0.8, 0.99))
 
 max_steps = config['training']['max_steps']
 remaining_steps = max_steps - RESUME_STEP
@@ -218,7 +218,10 @@ while steps < max_steps:
             sem_idx_flat = sem_indices.view(sem_indices.size(0), -1).detach()
             pro_idx_flat = pro_indices.view(pro_indices.size(0), -1).detach()
             sem_bits_batch, pro_bits_batch = entropy_model.estimate_bits(sem_idx_flat, pro_idx_flat)
-            entropy_loss = (sem_bits_batch.mean() + pro_bits_batch.mean()) * entropy_weight
+            
+            # Entropy Warmup: 0 weight for first 5000 steps
+            curr_entropy_weight = 0.0 if steps < 5000 else entropy_weight
+            entropy_loss = (sem_bits_batch.mean() + pro_bits_batch.mean()) * curr_entropy_weight
             
             audio_hat = decoder(sem_z, pro_z, spk_z)
             if audio_hat.dim() == 2: audio_hat = audio_hat.unsqueeze(1)

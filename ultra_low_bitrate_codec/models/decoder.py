@@ -9,6 +9,32 @@ Key improvements:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor, shape [seq_len, batch_size, embedding_dim] or [batch_size, seq_len, embedding_dim]
+        """
+        # Adapt to batch_first=True used in Transformer
+        if x.size(1) == self.pe.shape[2]: # x is [B, T, D]
+             x = x + self.pe[:x.size(1), 0, :].unsqueeze(0)
+        else: # x is [T, B, D]
+             x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
+
 
 
 class LearnableUpsampler(nn.Module):
@@ -140,6 +166,9 @@ class FeatureReconstructorV2(nn.Module):
             fusion_dim, num_heads=dec_cfg['fusion_heads']
         )
         
+        # Positional Encoding
+        self.pos_encoder = PositionalEncoding(fusion_dim, dropout=dec_cfg['dropout'])
+        
         # Main transformer
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=fusion_dim,
@@ -199,6 +228,7 @@ class FeatureReconstructorV2(nn.Module):
         # For simplicity, we'll use the transformer directly
         
         # Transformer refinement
+        x = self.pos_encoder(x)
         x = self.transformer(x)
         
         # Output

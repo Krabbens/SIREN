@@ -27,9 +27,31 @@ from ultra_low_bitrate_codec.data.feature_dataset import PrecomputedFeatureDatas
 from ultra_low_bitrate_codec.training.losses import MultiResolutionSTFTLoss, discriminator_loss, generator_loss
 
 # Configuration
-CONFIG_PATH = "/home/sperm/diff/ultra_low_bitrate_codec/configs/multispeaker.yaml"
-CHECKPOINT_DIR = "/home/sperm/diff/checkpoints_multispeaker"
-RESUME_STEP = 5000  # Resume from this step
+import argparse
+import glob
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--config", type=str, default="/home/sperm/diff/ultra_low_bitrate_codec/configs/multispeaker_optimized.yaml")
+parser.add_argument("--checkpoint_dir", type=str, default="/home/sperm/diff/checkpoints_multispeaker")
+parser.add_argument("--resume_step", type=int, default=-1, help="Step to resume from. -1 to auto-detect.")
+args = parser.parse_args()
+
+CONFIG_PATH = args.config
+CHECKPOINT_DIR = args.checkpoint_dir
+
+# Auto-detect resume step
+if args.resume_step == -1:
+    # Look for files like factorizer_*.pt
+    ckpts = glob.glob(f"{CHECKPOINT_DIR}/factorizer_*.pt")
+    if not ckpts:
+        RESUME_STEP = 0
+        print("No checkpoints found. Starting from scratch.")
+    else:
+        steps = [int(os.path.basename(c).split('_')[-1].split('.')[0]) for c in ckpts]
+        RESUME_STEP = max(steps)
+        print(f"Auto-detected checkpoint step: {RESUME_STEP}")
+else:
+    RESUME_STEP = args.resume_step
 
 with open(CONFIG_PATH, 'r') as f:
     config = yaml.safe_load(f)
@@ -63,21 +85,35 @@ discriminator = HiFiGANDiscriminator().to(device)
 
 
 # Load checkpoints
-print("Loading checkpoints...")
-factorizer.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/factorizer_{RESUME_STEP}.pt", map_location=device))
-decoder.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/decoder_{RESUME_STEP}.pt", map_location=device))
-sem_vq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/sem_rfsq_{RESUME_STEP}.pt", map_location=device))
-pro_vq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/pro_rfsq_{RESUME_STEP}.pt", map_location=device))
-spk_pq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/spk_pq_{RESUME_STEP}.pt", map_location=device))
-entropy_model.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/entropy_{RESUME_STEP}.pt", map_location=device))
-discriminator.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/discriminator_{RESUME_STEP}.pt", map_location=device), strict=False)
-print("Checkpoints loaded!")
+if RESUME_STEP > 0:
+    print(f"Loading checkpoints from step {RESUME_STEP}...")
+    try:
+        factorizer.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/factorizer_{RESUME_STEP}.pt", map_location=device))
+        decoder.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/decoder_{RESUME_STEP}.pt", map_location=device))
+        sem_vq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/sem_rfsq_{RESUME_STEP}.pt", map_location=device))
+        pro_vq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/pro_rfsq_{RESUME_STEP}.pt", map_location=device))
+        spk_pq.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/spk_pq_{RESUME_STEP}.pt", map_location=device))
+        try:
+            entropy_model.load_state_dict(torch.load(f"{CHECKPOINT_DIR}/entropy_{RESUME_STEP}.pt", map_location=device))
+        except (RuntimeError, FileNotFoundError) as e:
+            print(f"⚠️ Could not load entropy model (shape mismatch or missing): {e}. Re-initializing.")
+        # Optional: Load discriminator
+        disc_path = f"{CHECKPOINT_DIR}/discriminator_{RESUME_STEP}.pt"
+        if os.path.exists(disc_path):
+             discriminator.load_state_dict(torch.load(disc_path, map_location=device), strict=False)
+        print("Checkpoints loaded!")
+    except FileNotFoundError as e:
+        print(f"Error loading checkpoints: {e}. Starting from 0?")
+        RESUME_STEP = 0
+else:
+    print("Starting training from scratch (Step 0).")
 
 # CUDA optimization: torch.compile() for faster training
-# print("Compiling models with torch.compile()...")
-# discriminator = torch.compile(discriminator, mode='reduce-overhead')
-# factorizer = torch.compile(factorizer, mode='reduce-overhead')
-# decoder = torch.compile(decoder, mode='reduce-overhead')
+# CUDA optimization: torch.compile() for faster training
+print("Compiling models with torch.compile()...")
+discriminator = torch.compile(discriminator, mode='default')
+factorizer = torch.compile(factorizer, mode='default')
+decoder = torch.compile(decoder, mode='default')
 
 # Optimizers
 params = list(factorizer.parameters()) + list(decoder.parameters()) + \
@@ -178,9 +214,22 @@ while steps < max_steps:
             sem, pro, spk = factorizer(features)
             
         with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-            sem_z, sem_loss, _ = sem_vq(sem)
-            pro_z, pro_loss, _ = pro_vq(pro)
-            spk_z, spk_loss, _ = spk_pq(spk)
+            sem_z, sem_loss, sem_indices = sem_vq(sem)
+            pro_z, pro_loss, pro_indices = pro_vq(pro)
+            spk_z, spk_loss, spk_indices = spk_pq(spk)
+            
+            # Entropy Model Training (Indices are detached)
+            # We flatten indices if needed, or EntropyModel handles (B, T, L)
+            # Currently EntropyModel expects (B, T*L) or (B, T). 
+            # RFSQ gives (B, T, L). Flatten to (B, T*L).
+            sem_idx_flat = sem_indices.view(sem_indices.size(0), -1).detach()
+            pro_idx_flat = pro_indices.view(pro_indices.size(0), -1).detach()
+            
+            # Estimate bits (Cross Entropy)
+            sem_bits_batch, pro_bits_batch = entropy_model.estimate_bits(sem_idx_flat, pro_idx_flat)
+            entropy_loss = (sem_bits_batch.mean() + pro_bits_batch.mean()) * 0.01 # Small weight to balance gradient scale? 
+            # Actually, just minimized NLL. Weight doesn't affect other components since indices are detached.
+            
             audio_hat = decoder(sem_z, pro_z, spk_z)
             if audio_hat.dim() == 2: audio_hat = audio_hat.unsqueeze(1)
             min_len = min(audio.shape[-1], audio_hat.shape[-1])
@@ -241,12 +290,13 @@ while steps < max_steps:
             mel_loss = F.l1_loss(mel_fn(audio), mel_fn(audio_hat))
             q_loss = sem_loss + pro_loss + spk_loss
             
-            # Bitrate estimation (approximate)
-            bits_sem = sem_vq.get_total_bits_per_frame() * sem.shape[1]
-            bits_pro = pro_vq.get_total_bits_per_frame() * pro.shape[1]
-            bps = (bits_sem + bits_pro + 32) / (audio.shape[-1] / 16000)
+            # Bitrate estimation (Compressed)
+            # sem_bits_batch is Total Bits per sequence.
+            # spk bits = 32 (raw)
+            est_bits = sem_bits_batch.mean() + pro_bits_batch.mean() + 32
+            bps = est_bits / (audio.shape[-1] / 16000)
             
-            loss_g = (stft_loss * 2.0 + mel_loss * 45.0 + q_loss * 0.25 + loss_gan)
+            loss_g = (stft_loss * 2.0 + mel_loss * 45.0 + q_loss * 0.25 + loss_gan + entropy_loss)
         
         # NaN check
         if torch.isnan(loss_g):

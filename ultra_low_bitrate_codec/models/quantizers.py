@@ -54,6 +54,10 @@ class FSQ(nn.Module):
         loss = torch.mean((z_q.detach() - z) ** 2)
         return z_q, loss, indices
 
+    def from_indices(self, indices):
+        """Reconstruct z_q from indices"""
+        return self.indices_to_codes(indices)
+
 
 class ResidualFSQ(nn.Module):
     """
@@ -150,6 +154,27 @@ class ResidualFSQ(nn.Module):
         bits_per_level = math.log2(self.vocab_size)
         return bits_per_level * self.num_levels
 
+    def from_indices(self, indices):
+        """
+        Reconstruct z_q from indices
+        Args:
+            indices: (B, T, num_levels)
+        """
+        z_q = 0
+        
+        for i, (quantizer, scale) in enumerate(zip(self.quantizers, self.residual_scales)):
+            if i >= indices.shape[-1]:
+                break
+            indices_level = indices[:, :, i]
+            z_q_level = quantizer.from_indices(indices_level)
+            z_q = z_q + z_q_level * scale
+            
+        # Project back if needed
+        if self.has_proj:
+            z_q = self.output_proj(z_q)
+            
+        return z_q
+
 
 class ProductQuantizer(nn.Module):
     """Product Quantization for speaker embeddings"""
@@ -207,3 +232,27 @@ class ProductQuantizer(nn.Module):
             indices = indices.squeeze(1)
             
         return x_q, losses, indices
+
+    def from_indices(self, indices):
+        """
+        Reconstruct z_q from indices
+        Args:
+            indices: (B, T, num_groups) or (B, num_groups)
+        """
+        if indices.dim() == 2: # (B, num_groups) for speaker
+             indices = indices.unsqueeze(1) # (B, 1, num_groups)
+             
+        B, T, G = indices.shape
+        quantized_groups = []
+        
+        for i, codebook in enumerate(self.codebooks):
+            idx = indices[:, :, i]
+            x_q_g = codebook(idx) # (B, T, D_g)
+            quantized_groups.append(x_q_g)
+            
+        x_q = torch.cat(quantized_groups, dim=-1)
+        
+        if T == 1 and self.input_dim == x_q.shape[-1]: # Handle squeezing if needed
+             pass 
+             
+        return x_q

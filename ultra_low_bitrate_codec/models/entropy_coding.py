@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ProbabilisticLM(nn.Module):
-    def __init__(self, num_tokens, dim, depth=2, heads=4, max_seq_len=256):
+    def __init__(self, num_tokens, dim, depth=2, heads=4, max_seq_len=4096):
         super().__init__()
         self.num_tokens = num_tokens
         
@@ -32,26 +32,29 @@ class ProbabilisticLM(nn.Module):
         logits = self.head(h)
         return logits
 
+# ... (forward remains same)
+
 class EntropyModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         
         sem_tokens = config['model']['semantic']['vocab_size']
         pro_tokens = config['model']['prosody']['vocab_size']
-        
-        # Shared or separate LMs? 
-        # Plan says: "Shared for semantic & prosody (with type embed)"
-        # Simple approach: Two small LMs to avoid complexity of interleaving 12.5Hz and 6.25Hz streams.
+        context_len = config['model']['entropy'].get('context_length', 4096)
+        # Force large context if not specified sufficient
+        if context_len < 4096: context_len = 4096
         
         self.sem_lm = ProbabilisticLM(sem_tokens, 
                                      config['model']['entropy']['lm_dim'],
                                      config['model']['entropy']['lm_layers'],
-                                     config['model']['entropy']['lm_heads'])
+                                     config['model']['entropy']['lm_heads'],
+                                     max_seq_len=context_len)
                                      
         self.pro_lm = ProbabilisticLM(pro_tokens, 
                                      config['model']['entropy']['lm_dim'],
                                      config['model']['entropy']['lm_layers'],
-                                     config['model']['entropy']['lm_heads'])
+                                     config['model']['entropy']['lm_heads'],
+                                     max_seq_len=context_len)
                                      
     def forward(self, sem_idx, pro_idx):
         # sem_idx: (B, T_s)

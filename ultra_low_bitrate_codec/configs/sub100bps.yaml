@@ -22,7 +22,7 @@ model:
     input_dim: 768
     hidden_dim: 128
     output_dim: 4  # Match fsq_levels dim
-    temporal_compression: 16  # 16x (was 8x)
+    temporal_compression: 8  # 16x (was 8x)
     vocab_size: 625
     
   # Speaker
@@ -70,9 +70,9 @@ training:
   
   # Loss weights (No GAN)
   reconstruction_weight: 1.0
-  mel_weight: 45.0
+  mel_weight: 20.0
   stft_weight: 2.0
-  wavlm_weight: 0.1  # Perceptual loss
+  wavlm_weight: 1.0  # Perceptual loss
   entropy_weight: 0.01
   
   # Logging
