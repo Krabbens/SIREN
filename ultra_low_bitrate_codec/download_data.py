@@ -33,12 +33,37 @@ def download_libritts(output_dir: str, subset: str = "train-clean-100",
     
     print(f"📥 Downloading LibriTTS '{subset}' from HuggingFace...")
     
-    # Load dataset
-    if cache_dir:
-        ds = load_dataset("mythicinfinity/libritts", subset, 
-                         split="train", cache_dir=cache_dir)
+    # Map subset to config and split
+    # Available configs: ['dev', 'clean', 'other', 'all']
+    # Example splits: 'train.clean.100', 'train.clean.360', 'train.other.500', 'dev.clean'
+    
+    config_name = "clean"
+    split_name = "train.clean.100"
+    
+    if "clean" in subset:
+        config_name = "clean"
+    elif "other" in subset:
+        config_name = "other"
     else:
-        ds = load_dataset("mythicinfinity/libritts", subset, split="train")
+        config_name = "all"
+        
+    # Replace hyphens with dots for split name (e.g. train-clean-100 -> train.clean.100)
+    split_name = subset.replace("-", ".")
+    
+    print(f"🔍 Mapped request '{subset}' to config='{config_name}', split='{split_name}'")
+    
+    # Load dataset
+    try:
+        if cache_dir:
+            ds = load_dataset("mythicinfinity/libritts", config_name, 
+                             split=split_name, cache_dir=cache_dir)
+        else:
+            ds = load_dataset("mythicinfinity/libritts", config_name, split=split_name)
+    except ValueError as e:
+        print(f"❌ Error loading dataset: {e}")
+        print(f"Attempting fallback to 'all' config matching...")
+        # Fallback: try 'all' config if specific one fails
+        ds = load_dataset("mythicinfinity/libritts", "all", split=split_name)
     
     print(f"📊 Dataset size: {len(ds)} samples")
     
