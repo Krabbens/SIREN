@@ -1,0 +1,96 @@
+model:
+  # Feature Extractor
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  
+  # Quantizer Settings - SUB-100BPS
+  quantizer_type: "rfsq"
+  fsq_levels: [5, 5, 5, 5]  # 4 dims, 5^4 = 625 codes (~9.3 bits/level)
+  rfsq_num_levels: 2  # 2 residual levels
+  
+  # Semantic Branch - AGGRESSIVE COMPRESSION
+  semantic:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 4  # Match fsq_levels dim
+    temporal_compression: 8  # 8x (was 4x)
+    vocab_size: 625
+    
+  # Prosody Branch - AGGRESSIVE COMPRESSION
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 4  # Match fsq_levels dim
+    temporal_compression: 16  # 16x (was 8x)
+    vocab_size: 625
+    
+  # Speaker
+  speaker:
+    embedding_dim: 256
+    num_groups: 8
+    codes_per_group: 256
+    
+  # Entropy Coding
+  entropy:
+    enabled: true
+    lm_layers: 3
+    lm_dim: 256
+    lm_heads: 8
+    context_length: 128
+    vocab_size: 625  # Match FSQ vocab
+    
+  # Decoder (Fusion)
+  decoder:
+    fusion_dim: 512
+    fusion_heads: 8
+    fusion_layers: 4
+    dropout: 0.1
+        
+  # Vocoder (Vocos-style, no GAN)
+  vocoder:
+    type: "vocos_v2"
+    dim: 512
+    num_convnext_layers: 8
+    num_res_blocks: 3
+
+training:
+  batch_size: 32
+  learning_rate: 2e-4
+  warmup_steps: 2000
+  max_steps: 100000
+  num_workers: 16
+  persistent_workers: true
+  
+  # NO GAN - Removed discriminator
+  use_gan: false
+  
+  # VQ/FSQ specific
+  commitment_weight: 0.25
+  
+  # Loss weights (No GAN)
+  reconstruction_weight: 1.0
+  mel_weight: 45.0
+  stft_weight: 2.0
+  wavlm_weight: 0.1  # Perceptual loss
+  entropy_weight: 0.01
+  
+  # Logging
+  log_every: 100
+  eval_every: 3000
+  save_every: 500
+  
+data:
+  train_manifest: "/home/sperm/diff/data/multispeaker_manifest_train.json"
+  val_manifest: "/home/sperm/diff/data/multispeaker_manifest_val.json"
+  feature_dir: "/home/sperm/diff/data/features_multispeaker"
+  sample_rate: 16000
+  max_duration: 15.0
+  min_duration: 1.0
+  
+  multi_speaker: true
+  num_speakers: -1
+
+audio:
+  sample_rate: 16000
+  hop_length: 320
