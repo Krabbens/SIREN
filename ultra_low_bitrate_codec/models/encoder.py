@@ -134,7 +134,7 @@ class InformationFactorizerV2(nn.Module):
         # ========================================
         self.semantic_reducer = RateReduction(
             input_dim, sem_cfg['hidden_dim'], 
-            factor=sem_cfg['temporal_compression']
+            factor=sem_cfg.get('temporal_compression', 8)  # Default 8x
         )
         self.semantic_conformer = ConformerBlock(
             sem_cfg['hidden_dim'], num_heads=4, kernel_size=15
@@ -150,7 +150,7 @@ class InformationFactorizerV2(nn.Module):
         # ========================================
         self.prosody_reducer = RateReduction(
             input_dim, pro_cfg['hidden_dim'],
-            factor=pro_cfg['temporal_compression']
+            factor=pro_cfg.get('temporal_compression', 16)  # Default 16x
         )
         self.prosody_conformer = ConformerBlock(
             pro_cfg['hidden_dim'], num_heads=4, kernel_size=31

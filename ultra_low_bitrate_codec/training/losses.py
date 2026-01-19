@@ -89,3 +89,66 @@ def generator_loss(disc_outputs):
         loss += l
 
     return loss, gen_losses
+
+
+class WavLMPerceptualLoss(nn.Module):
+    """
+    Perceptual loss using WavLM features.
+    More stable than GAN, captures semantic and acoustic quality.
+    """
+    def __init__(self, model_name="microsoft/wavlm-base", layers=[4, 8, 12], device='cuda'):
+        super().__init__()
+        from transformers import WavLMModel
+        
+        self.model = WavLMModel.from_pretrained(model_name)
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+        
+        self.layers = layers
+        self.model.to(device)
+        
+    def extract_features(self, audio):
+        """Extract features from multiple layers"""
+        # audio: (B, T) at 16kHz
+        if audio.dim() == 3:
+            audio = audio.squeeze(1)
+        
+        with torch.no_grad():
+            outputs = self.model(audio, output_hidden_states=True)
+            hidden_states = outputs.hidden_states
+        
+        features = []
+        for layer_idx in self.layers:
+            if layer_idx < len(hidden_states):
+                features.append(hidden_states[layer_idx])
+        
+        return features
+    
+    def forward(self, audio_real, audio_fake):
+        """
+        Compute perceptual loss between real and fake audio.
+        """
+        # Align lengths
+        min_len = min(audio_real.shape[-1], audio_fake.shape[-1])
+        audio_real = audio_real[..., :min_len]
+        audio_fake = audio_fake[..., :min_len]
+        
+        if audio_real.dim() == 3:
+            audio_real = audio_real.squeeze(1)
+        if audio_fake.dim() == 3:
+            audio_fake = audio_fake.squeeze(1)
+        
+        # Extract features
+        feats_real = self.extract_features(audio_real)
+        feats_fake = self.extract_features(audio_fake.detach())  # Detach for stability
+        
+        # Compute L1 loss across layers
+        loss = 0
+        for fr, ff in zip(feats_real, feats_fake):
+            # Align temporal dimension
+            min_t = min(fr.shape[1], ff.shape[1])
+            loss += F.l1_loss(ff[:, :min_t], fr[:, :min_t])
+        
+        return loss / len(feats_real)
+
