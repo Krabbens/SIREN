@@ -24,3 +24,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ultra_low_bitrate_codec"]
+
+[project.scripts]
+train = "ultra_low_bitrate_codec.train:main"
