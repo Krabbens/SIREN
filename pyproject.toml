@@ -27,3 +27,4 @@ packages = ["ultra_low_bitrate_codec"]
 
 [project.scripts]
 train = "ultra_low_bitrate_codec.train:main"
+download-data = "ultra_low_bitrate_codec.download_data:main"
