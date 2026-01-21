@@ -91,10 +91,8 @@ class ResidualFSQ(nn.Module):
         else:
             self.quantizers = nn.ModuleList([FSQ(levels) for _ in range(num_levels)])
         
-        # Residual scaling (learnable, starts small for stability)
-        self.residual_scales = nn.ParameterList([
-            nn.Parameter(torch.ones(1) * (0.5 ** i)) for i in range(num_levels)
-        ])
+        # Residual scaling (fixed to 1.0 for stability with LayerNorm)
+        self.register_buffer("residual_scales", torch.ones(num_levels))
         
         # Single vocab size from base FSQ
         self.vocab_size = self.quantizers[0].vocab_size

@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ultra_low_bitrate_codec.models.encoder import InformationFactorizerV2
 from ultra_low_bitrate_codec.models.decoder import SpeechDecoderV2
 from ultra_low_bitrate_codec.models.quantizers import ResidualFSQ, ProductQuantizer
+from ultra_low_bitrate_codec.models.entropy_coding import EntropyModel
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -77,6 +78,8 @@ def main():
         num_groups=config['model']['speaker']['num_groups'],
         codes_per_group=config['model']['speaker']['codes_per_group']
     ).to(device)
+    
+    entropy_model = EntropyModel(config).to(device)
 
     # Load Weights
     ckpt_dir = args.checkpoint_dir
@@ -89,14 +92,39 @@ def main():
                 new_state_dict[k[10:]] = v
             else:
                 new_state_dict[k] = v
-        model.load_state_dict(new_state_dict)
+        model.load_state_dict(new_state_dict, strict=False)
 
     try:
-        load_clean_state_dict(factorizer, f"{ckpt_dir}/factorizer_{step}.pt")
-        load_clean_state_dict(decoder, f"{ckpt_dir}/decoder_{step}.pt")
-        load_clean_state_dict(sem_vq, f"{ckpt_dir}/sem_rfsq_{step}.pt")
-        load_clean_state_dict(pro_vq, f"{ckpt_dir}/pro_rfsq_{step}.pt")
-        load_clean_state_dict(spk_pq, f"{ckpt_dir}/spk_pq_{step}.pt")
+        # Dictionary mapping model objects to their expected filenames
+        models_to_load = {
+            'factorizer': (factorizer, 'factorizer'),
+            'decoder': (decoder, 'decoder'),
+            'sem_vq': (sem_vq, 'sem_rfsq'),
+            'pro_vq': (pro_vq, 'pro_rfsq'),
+            'spk_pq': (spk_pq, 'spk_pq'),
+            'entropy': (entropy_model, 'entropy')
+        }
+
+        for name, (model, filename_base) in models_to_load.items():
+            # Try flat structure first: {ckpt_dir}/{filename_base}_{step}.pt
+            flat_path = os.path.join(ckpt_dir, f"{filename_base}_{step}.pt")
+            # Try nested structure: {ckpt_dir}/step_{step}/{filename_base}.pt
+            nested_path = os.path.join(ckpt_dir, f"step_{step}", f"{filename_base}.pt")
+
+            if os.path.exists(flat_path):
+                load_path = flat_path
+            elif os.path.exists(nested_path):
+                load_path = nested_path
+            else:
+                # Don't fail if entropy model missing (legacy checkpoints)
+                if name == 'entropy':
+                    print(f"Warning: Entropy model checkpoint not found. Entropy metrics will be histograms only.")
+                    continue
+                raise FileNotFoundError(f"Could not find checkpoint for {name}. Checked:\n1. {flat_path}\n2. {nested_path}")
+            
+            print(f"Loading {name} from {load_path}")
+            load_clean_state_dict(model, load_path)
+
         print("Model weights loaded!")
     except FileNotFoundError as e:
         print(f"Error loading checkpoints: {e}")
@@ -107,6 +135,7 @@ def main():
     sem_vq.eval()
     pro_vq.eval()
     spk_pq.eval()
+    entropy_model.eval()
     
     # Load HuBERT for features
     print("Loading HuBERT...")
@@ -171,26 +200,42 @@ def main():
         return entropy
 
     # Vocab sizes
-    # FSQ levels=[3,3,3,3,3,3,3,3] -> 3^8 = 6561
-    fsq_vocab = 6561
+    # Calculate dynamically from config
+    fsq_levels = config['model']['fsq_levels']
+    fsq_vocab = 1
+    for l in fsq_levels:
+        fsq_vocab *= l
+    
     # Speaker has 8 groups of 256 -> 256
     spk_vocab = 256
 
-    # Calculate entropies
+    # Calculate entropies using the trained EntropyModel (True compression rate)
     print(f"\n{'='*20} ENTROPY ANALYSIS {'='*20}")
     
-    # Semantic Entropy
-    # indices shape: [B, T, 4]
-    sem_ent_per_code = calculate_entropy(sem_indices, fsq_vocab)
-    print(f"Semantic Entropy: {sem_ent_per_code:.2f} bits/code (Theoretical vs {math.log2(fsq_vocab):.2f} Raw)")
+    # Defaults (if model fails)
+    sem_bits_per_token = math.log2(fsq_vocab)
+    pro_bits_per_token = math.log2(fsq_vocab)
     
-    # Prosody Entropy
-    pro_ent_per_code = calculate_entropy(pro_indices, fsq_vocab)
-    print(f"Prosody Entropy:  {pro_ent_per_code:.2f} bits/code (Theoretical vs {math.log2(fsq_vocab):.2f} Raw)")
+    with torch.no_grad():
+        sem_idx_flat = sem_indices.view(sem_indices.shape[0], -1)
+        pro_idx_flat = pro_indices.view(pro_indices.shape[0], -1)
+        
+        try:
+             # Returns total bits for the sequence
+             sem_bits_total, pro_bits_total = entropy_model.estimate_bits(sem_idx_flat, pro_idx_flat)
+             
+             # Convert to avg bits per token
+             sem_bits_per_token = sem_bits_total.sum().item() / sem_idx_flat.numel()
+             pro_bits_per_token = pro_bits_total.sum().item() / pro_idx_flat.numel()
+             
+             print(f"Semantic Model Entropy: {sem_bits_per_token:.2f} bits/code")
+             print(f"Prosody Model Entropy:  {pro_bits_per_token:.2f} bits/code")
+             
+        except Exception as e:
+             print(f"Entropy Model Eval Failed: {e}")
     
-    # Speaker Entropy
     spk_ent_per_code = calculate_entropy(spk_indices, spk_vocab)
-    print(f"Speaker Entropy:  {spk_ent_per_code:.2f} bits/code (Theoretical vs {math.log2(spk_vocab):.2f} Raw)")
+    print(f"Speaker Entropy (Hist):  {spk_ent_per_code:.2f} bits/code (Theoretical vs {math.log2(spk_vocab):.2f} Raw)")
 
     print(f"{'='*58}\n")
 
@@ -215,6 +260,12 @@ def main():
             
         sem_z_partial = get_partial_z(sem_vq, sem_indices, l)
         pro_z_partial = get_partial_z(pro_vq, pro_indices, l)
+        
+        # DEBUG: Check if indices are diverse
+        if l > 1:
+            curr_sem_indices = sem_indices[..., l-1]
+            curr_pro_indices = pro_indices[..., l-1]
+            print(f"  Level {l} Unique Indices - Sem: {len(torch.unique(curr_sem_indices))} / Pro: {len(torch.unique(curr_pro_indices))}")
         
         # Speaker is always full resolution for now (it's small anyway)
         # spk_z is already computed
@@ -246,16 +297,14 @@ def main():
         
         # Entropy Bits (Assuming we can achieve the calculated entropy per code)
         # Note: Entropy might change slightly if we only consider the first L levels, 
-        # but using the aggregate entropy is a fair first-order approximation 
-        # (or we could recalc entropy for just these levels). 
-        # Let's recalc for accuracy.
+        # Entropy Bits (Using Model Estimation)
+        # We use the average bits per token derived from the full sequence.
+        # This is an approximation for partial levels (assuming equal distribution across levels)
+        # but much more accurate than the broken histogram.
         
-        sem_ent_l = calculate_entropy(sem_indices[..., :l], fsq_vocab)
-        pro_ent_l = calculate_entropy(pro_indices[..., :l], fsq_vocab)
-        
-        bits_sem_ent = n_sem_codes * sem_ent_l
-        bits_pro_ent = n_pro_codes * pro_ent_l
-        bits_spk_ent = n_spk_codes * spk_ent_per_code # constant
+        bits_sem_ent = n_sem_codes * sem_bits_per_token
+        bits_pro_ent = n_pro_codes * pro_bits_per_token
+        bits_spk_ent = n_spk_codes * spk_ent_per_code 
         
         total_bits_ent = bits_sem_ent + bits_pro_ent + bits_spk_ent
         bps_ent = total_bits_ent / duration

@@ -4,26 +4,32 @@ model:
   hubert_layer: 9
   freeze_hubert: true
   
-  # Quantizer Settings - SUB-100BPS
+  # =========================================
+  # QUANTIZER - INCREASED CAPACITY
+  # =========================================
   quantizer_type: "rfsq"
-  fsq_levels: [5, 5, 5, 5]  # 4 dims, 5^4 = 625 codes (~9.3 bits/level)
-  rfsq_num_levels: 2  # 2 residual levels
+  fsq_levels: [8, 8, 8, 8, 8, 8, 8, 8]  # 8 dims @ 8 levels
+  rfsq_num_levels: 3  # More residual refinement
   
-  # Semantic Branch - AGGRESSIVE COMPRESSION
+  # =========================================
+  # SEMANTIC - FASTER TEMPORAL, MORE DIMS
+  # =========================================
   semantic:
     input_dim: 768
     hidden_dim: 256
-    output_dim: 4  # Match fsq_levels dim
-    temporal_compression: 8  # 8x (was 4x)
-    vocab_size: 625
+    output_dim: 8       # Was 4
+    temporal_compression: 2  # Was 4 → 25Hz instead of 12.5Hz
+    vocab_size: 512  # 8 levels per dim * 8 dims * 8 residual levels = reasonable
     
-  # Prosody Branch - AGGRESSIVE COMPRESSION
+  # =========================================
+  # PROSODY - FASTER TEMPORAL, MORE DIMS
+  # =========================================
   prosody:
     input_dim: 768
     hidden_dim: 128
-    output_dim: 4  # Match fsq_levels dim
-    temporal_compression: 8  # 16x (was 8x)
-    vocab_size: 625
+    output_dim: 8       # Was 4
+    temporal_compression: 8  # Was 16 → 6.25Hz instead of 3.125Hz
+    vocab_size: 512
     
   # Speaker
   speaker:
@@ -38,7 +44,7 @@ model:
     lm_dim: 256
     lm_heads: 8
     context_length: 128
-    vocab_size: 625  # Match FSQ vocab
+    vocab_size: 512
     
   # Decoder (Fusion)
   decoder:
@@ -47,7 +53,7 @@ model:
     fusion_layers: 4
     dropout: 0.1
         
-  # Vocoder (Vocos-style, no GAN)
+  # Vocoder
   vocoder:
     type: "vocos_v2"
     dim: 512
@@ -55,25 +61,36 @@ model:
     num_res_blocks: 3
 
 training:
-  batch_size: 32
-  learning_rate: 2e-4
+  batch_size: 16  # Reduced from 24 to fix OOM
+  learning_rate: 5e-5  # Lower for stability (was 1e-4)
   warmup_steps: 2000
   max_steps: 100000
-  num_workers: 16
+  num_workers: 2  # Reduced from 8 to save RAM
   persistent_workers: true
   
-  # NO GAN - Removed discriminator
   use_gan: false
   
-  # VQ/FSQ specific
+  # VQ/FSQ
   commitment_weight: 0.25
   
-  # Loss weights (No GAN)
-  reconstruction_weight: 1.0
-  mel_weight: 20.0
-  stft_weight: 2.0
-  wavlm_weight: 1.0  # Perceptual loss
+  # =========================================
+  # LOSS WEIGHTS - BALANCED SUITE
+  # =========================================
+  stft_weight: 5.0              # Core spectral
+  bandwise_mel_weight: 3.0      # Band-wise perceptual
+  waveform_weight: 1.0          # Time-domain phase
+  spectral_flux_weight: 0.5     # Temporal smoothness
+  
+  # DISABLED (broken/heavy/conflicting)
+  speaker_loss_weight: 0.0
+  phase_loss_weight: 0.0
+  mfcc_weight: 0.0
+  multi_mel_weight: 0.0
+  feature_loss_weight: 0.0
+  mel_weight: 0.0  # Replaced by bandwise
+  
   entropy_weight: 0.01
+  sharpener_enabled: false
   
   # Logging
   log_every: 100
@@ -81,9 +98,9 @@ training:
   save_every: 500
   
 data:
-  train_manifest: "/home/sperm/diff/data/multispeaker_manifest_train.json"
-  val_manifest: "/home/sperm/diff/data/multispeaker_manifest_val.json"
-  feature_dir: "/home/sperm/diff/data/features_multispeaker"
+  train_manifest: "/home/sperm/siren/SIREN/data/mixed_train.json"
+  val_manifest: "/home/sperm/siren/SIREN/data/mixed_val.json"
+  feature_dir: "/home/sperm/siren/SIREN/data/features_mixed"
   sample_rate: 16000
   max_duration: 15.0
   min_duration: 1.0

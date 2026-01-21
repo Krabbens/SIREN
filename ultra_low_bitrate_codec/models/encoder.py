@@ -142,7 +142,8 @@ class InformationFactorizerV2(nn.Module):
         self.semantic_proj = nn.Sequential(
             nn.Linear(sem_cfg['hidden_dim'], sem_cfg['hidden_dim']),
             nn.SiLU(),
-            nn.Linear(sem_cfg['hidden_dim'], sem_cfg['output_dim'])
+            nn.Linear(sem_cfg['hidden_dim'], sem_cfg['output_dim']),
+            nn.LayerNorm(sem_cfg['output_dim'])
         )
         
         # ========================================
@@ -158,7 +159,8 @@ class InformationFactorizerV2(nn.Module):
         self.prosody_proj = nn.Sequential(
             nn.Linear(pro_cfg['hidden_dim'], pro_cfg['hidden_dim']),
             nn.SiLU(),
-            nn.Linear(pro_cfg['hidden_dim'], pro_cfg['output_dim'])
+            nn.Linear(pro_cfg['hidden_dim'], pro_cfg['output_dim']),
+            nn.LayerNorm(pro_cfg['output_dim'])
         )
         
     def forward(self, x):

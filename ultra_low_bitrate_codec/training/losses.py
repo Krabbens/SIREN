@@ -1,154 +1,225 @@
+"""
+SIREN v2 Loss Functions
+Cleaned up, performance-focused implementations.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class MultiResolutionSTFTLoss(nn.Module):
-    """
-    Computes STFT loss at multiple resolutions to capture both
-    time (short-term) and frequency (long-term) details.
-    Standard high-fidelity loss for non-GAN vocoders.
-    """
-    def __init__(self,
-                 fft_sizes=[1024, 2048, 512],
-                 hop_sizes=[120, 240, 50],
-                 win_lengths=[600, 1200, 240],
-                 window="hann_window"):
-        super().__init__()
-        assert len(fft_sizes) == len(hop_sizes) == len(win_lengths)
-        self.losses = nn.ModuleList()
-        for fs, hs, wl in zip(fft_sizes, hop_sizes, win_lengths):
-            self.losses.append(STFTLoss(fs, hs, wl, window))
 
-    def forward(self, x, y):
-        sc_loss = 0.0
-        mag_loss = 0.0
-        for f in self.losses:
-            sc, mag = f(x, y)
-            sc_loss += sc
-            mag_loss += mag
-        
-        sc_loss /= len(self.losses)
-        mag_loss /= len(self.losses)
-        
-        return sc_loss, mag_loss
+# =============================================================================
+# CORE SPECTRAL LOSSES
+# =============================================================================
 
 class STFTLoss(nn.Module):
-    def __init__(self, fft_size, hop_size, win_length, window):
+    """Single-resolution STFT loss (spectral convergence + log magnitude)."""
+    
+    __constants__ = ['fft_size', 'hop_size', 'win_length']
+    
+    def __init__(self, fft_size: int, hop_size: int, win_length: int):
         super().__init__()
         self.fft_size = fft_size
         self.hop_size = hop_size
         self.win_length = win_length
-        self.win_length = win_length
-        self.window_name = window
-        self.register_buffer("window_tensor", getattr(torch, window)(win_length))
+        self.register_buffer("window", torch.hann_window(win_length))
 
-    def forward(self, x, y):
-        # x, y: (B, T)
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x: Generated audio (B, T)
+            y: Target audio (B, T)
+        Returns:
+            (spectral_convergence_loss, log_magnitude_loss)
+        """
+        x_stft = torch.stft(x, self.fft_size, self.hop_size, self.win_length, 
+                           window=self.window, return_complex=True)
+        y_stft = torch.stft(y, self.fft_size, self.hop_size, self.win_length, 
+                           window=self.window, return_complex=True)
         
-        # Spectral Convergence Loss
-        x_stft = torch.stft(x, self.fft_size, self.hop_size, self.win_length, return_complex=True, window=self.window_tensor)
-        y_stft = torch.stft(y, self.fft_size, self.hop_size, self.win_length, return_complex=True, window=self.window_tensor)
+        x_mag = x_stft.abs().clamp(min=1e-7)
+        y_mag = y_stft.abs().clamp(min=1e-7)
         
-        x_mag = torch.clamp(torch.abs(x_stft), min=1e-7)
-        y_mag = torch.clamp(torch.abs(y_stft), min=1e-7)
+        # Spectral convergence: normalized Frobenius norm
+        sc_loss = (y_mag - x_mag).norm(p='fro') / y_mag.norm(p='fro')
         
-        sc_loss = torch.norm(y_mag - x_mag, p="fro") / torch.norm(y_mag, p="fro")
-        
-        # Log Magnitude Loss
-        mag_loss = F.l1_loss(torch.log(y_mag), torch.log(x_mag))
+        # Log magnitude L1
+        mag_loss = F.l1_loss(x_mag.log(), y_mag.log())
         
         return sc_loss, mag_loss
 
-def feature_matching_loss(fmap_r, fmap_g):
-    loss = 0
-    for dr, dg in zip(fmap_r, fmap_g):
-        for rl, gl in zip(dr, dg):
-            loss += torch.mean(torch.abs(rl - gl))
-            
-    return loss * 2
 
-def discriminator_loss(disc_real_outputs, disc_generated_outputs):
-    loss = 0
-    r_losses = []
-    g_losses = []
-    for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        r_loss = torch.mean((1-dr)**2)
-        g_loss = torch.mean(dg**2)
-        loss += (r_loss + g_loss)
-        r_losses.append(r_loss.item())
-        g_losses.append(g_loss.item())
-
-    return loss, r_losses, g_losses
-
-def generator_loss(disc_outputs):
-    loss = 0
-    gen_losses = []
-    for dg in disc_outputs:
-        l = torch.mean((1-dg)**2)
-        gen_losses.append(l)
-        loss += l
-
-    return loss, gen_losses
-
-
-class WavLMPerceptualLoss(nn.Module):
-    """
-    Perceptual loss using WavLM features.
-    More stable than GAN, captures semantic and acoustic quality.
-    """
-    def __init__(self, model_name="microsoft/wavlm-base", layers=[4, 8, 12], device='cuda'):
-        super().__init__()
-        from transformers import WavLMModel
-        
-        self.model = WavLMModel.from_pretrained(model_name)
-        self.model.eval()
-        for p in self.model.parameters():
-            p.requires_grad = False
-        
-        self.layers = layers
-        self.model.to(device)
-        
-    def extract_features(self, audio):
-        """Extract features from multiple layers"""
-        # audio: (B, T) at 16kHz
-        if audio.dim() == 3:
-            audio = audio.squeeze(1)
-        
-        with torch.no_grad():
-            outputs = self.model(audio, output_hidden_states=True)
-            hidden_states = outputs.hidden_states
-        
-        features = []
-        for layer_idx in self.layers:
-            if layer_idx < len(hidden_states):
-                features.append(hidden_states[layer_idx])
-        
-        return features
+class MultiResolutionSTFTLoss(nn.Module):
+    """Multi-resolution STFT loss for time-frequency trade-off."""
     
-    def forward(self, audio_real, audio_fake):
+    def __init__(self,
+                 fft_sizes: tuple = (512, 1024, 2048),
+                 hop_sizes: tuple = (50, 120, 240),
+                 win_lengths: tuple = (240, 600, 1200)):
+        super().__init__()
+        self.losses = nn.ModuleList([
+            STFTLoss(fs, hs, wl) 
+            for fs, hs, wl in zip(fft_sizes, hop_sizes, win_lengths)
+        ])
+        self._num_losses = len(self.losses)
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        sc_loss = torch.tensor(0.0, device=x.device)
+        mag_loss = torch.tensor(0.0, device=x.device)
+        
+        for loss_fn in self.losses:
+            sc, mag = loss_fn(x, y)
+            sc_loss = sc_loss + sc
+            mag_loss = mag_loss + mag
+        
+        return sc_loss / self._num_losses, mag_loss / self._num_losses
+
+
+# =============================================================================
+# MEL LOSSES
+# =============================================================================
+
+class BandwiseMelLoss(nn.Module):
+    """
+    Band-wise Mel loss with per-band weighting.
+    Prevents model from sacrificing high frequencies.
+    
+    Performance: Single Mel computation, vectorized band slicing.
+    """
+    
+    def __init__(self, 
+                 n_mels: int = 80,
+                 sample_rate: int = 16000,
+                 n_fft: int = 1024,
+                 hop_length: int = 256,
+                 band_weights: tuple = (1.0, 1.5, 1.5, 2.0),
+                 device: str = 'cuda'):
+        super().__init__()
+        import torchaudio
+        
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            center=False
+        ).to(device)
+        
+        # Precompute band boundaries
+        n_bands = len(band_weights)
+        band_size = n_mels // n_bands
+        self.register_buffer('band_starts', torch.arange(0, n_mels, band_size)[:n_bands])
+        self.register_buffer('band_ends', torch.cat([
+            torch.arange(band_size, n_mels, band_size)[:n_bands-1],
+            torch.tensor([n_mels])
+        ]))
+        self.register_buffer('band_weights', torch.tensor(band_weights, dtype=torch.float32))
+        self._weight_sum = sum(band_weights)
+        
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """
-        Compute perceptual loss between real and fake audio.
+        Args:
+            x: Generated audio (B, T)
+            y: Target audio (B, T)
         """
         # Align lengths
-        min_len = min(audio_real.shape[-1], audio_fake.shape[-1])
-        audio_real = audio_real[..., :min_len]
-        audio_fake = audio_fake[..., :min_len]
+        min_len = min(x.shape[-1], y.shape[-1])
+        x, y = x[..., :min_len], y[..., :min_len]
         
-        if audio_real.dim() == 3:
-            audio_real = audio_real.squeeze(1)
-        if audio_fake.dim() == 3:
-            audio_fake = audio_fake.squeeze(1)
+        # Compute Mel (B, n_mels, T_frames)
+        mel_x = self.mel_transform(x).clamp(min=1e-5).log()
+        mel_y = self.mel_transform(y).clamp(min=1e-5).log()
         
-        # Extract features
-        feats_real = self.extract_features(audio_real)
-        feats_fake = self.extract_features(audio_fake.detach())  # Detach for stability
-        
-        # Compute L1 loss across layers
-        loss = 0
-        for fr, ff in zip(feats_real, feats_fake):
-            # Align temporal dimension
-            min_t = min(fr.shape[1], ff.shape[1])
-            loss += F.l1_loss(ff[:, :min_t], fr[:, :min_t])
-        
-        return loss / len(feats_real)
+        # Vectorized band loss computation
+        loss = torch.tensor(0.0, device=x.device)
+        for i, weight in enumerate(self.band_weights):
+            start, end = int(self.band_starts[i]), int(self.band_ends[i])
+            band_loss = F.l1_loss(mel_x[:, start:end], mel_y[:, start:end])
+            loss = loss + band_loss * weight
+            
+        return loss / self._weight_sum
 
+
+# =============================================================================
+# TIME-DOMAIN LOSSES
+# =============================================================================
+
+class WaveformL1Loss(nn.Module):
+    """
+    Direct L1 loss on waveform.
+    Implicitly enforces phase alignment (phase errors = waveform errors).
+    Extremely fast - no FFT computation.
+    """
+    
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        min_len = min(x.shape[-1], y.shape[-1])
+        return F.l1_loss(x[..., :min_len], y[..., :min_len])
+
+
+class SpectralFluxLoss(nn.Module):
+    """
+    Spectral flux loss - penalizes temporal discontinuities.
+    Measures rate of change in spectrum over time.
+    
+    Performance: Reuses STFT computation, vectorized diff.
+    """
+    
+    def __init__(self, n_fft: int = 1024, hop_length: int = 256):
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.register_buffer("window", torch.hann_window(n_fft))
+        
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        min_len = min(x.shape[-1], y.shape[-1])
+        x, y = x[..., :min_len], y[..., :min_len]
+        
+        # STFT magnitudes
+        x_spec = torch.stft(x, self.n_fft, self.hop_length, 
+                           window=self.window, return_complex=True).abs()
+        y_spec = torch.stft(y, self.n_fft, self.hop_length, 
+                           window=self.window, return_complex=True).abs()
+        
+        # Temporal difference (flux)
+        x_flux = torch.diff(x_spec, dim=-1)
+        y_flux = torch.diff(y_spec, dim=-1)
+        
+        return F.l1_loss(x_flux, y_flux)
+
+
+# =============================================================================
+# LEGACY LOSSES (kept for compatibility, use sparingly)
+# =============================================================================
+
+class PhaseAwareLoss(nn.Module):
+    """Group delay matching for temporal coherence."""
+    
+    def __init__(self, fft_size: int = 1024, hop_size: int = 256):
+        super().__init__()
+        self.fft_size = fft_size
+        self.hop_size = hop_size
+        self.register_buffer("window", torch.hann_window(fft_size))
+        
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        min_len = min(x.shape[-1], y.shape[-1])
+        x, y = x[..., :min_len].squeeze(1) if x.dim() == 3 else x[..., :min_len], \
+               y[..., :min_len].squeeze(1) if y.dim() == 3 else y[..., :min_len]
+        
+        # STFT phase
+        x_stft = torch.stft(x, self.fft_size, self.hop_size, self.fft_size,
+                           window=self.window, return_complex=True)
+        y_stft = torch.stft(y, self.fft_size, self.hop_size, self.fft_size,
+                           window=self.window, return_complex=True)
+        
+        x_phase = x_stft.angle()
+        y_phase = y_stft.angle()
+        
+        # Group delay = negative frequency derivative of phase
+        x_gd = -torch.diff(x_phase, dim=1)
+        y_gd = -torch.diff(y_phase, dim=1)
+        
+        # Wrap to [-pi, pi]
+        x_gd = x_gd - 2 * torch.pi * (x_gd / (2 * torch.pi)).round()
+        y_gd = y_gd - 2 * torch.pi * (y_gd / (2 * torch.pi)).round()
+        
+        min_t = min(x_gd.shape[-1], y_gd.shape[-1])
+        return F.l1_loss(x_gd[..., :min_t], y_gd[..., :min_t])

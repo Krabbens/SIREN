@@ -38,6 +38,16 @@ class PrecomputedFeatureDataset(Dataset):
             print(f"Loading optimized manifest: {manifest_path}")
             with open(manifest_path, 'r') as f:
                 self.entries = json.load(f)
+                
+            # Auto-populate feature_path if missing (common when using raw audio manifests)
+            if self.entries and 'feature_path' not in self.entries[0] and features_dir:
+                print(f"Dataset: Auto-inferring feature paths from {features_dir}")
+                features_path = Path(features_dir)
+                for entry in self.entries:
+                    if 'feature_path' not in entry and 'audio_path' in entry:
+                        # Match preprocess_data.py naming convention
+                        stem = Path(entry['audio_path']).stem
+                        entry['feature_path'] = str(features_path / f"{stem}.pt")
         else:
             # Fallback (legacy mode - should ideally not be reached in optimized flow)
             print("WARNING: No optimized manifest provided. Falling back to slow legacy mode.")

@@ -221,13 +221,109 @@ def prepare_from_existing_libritts(libritts_dir: str, output_dir: str):
     return train_path, val_path
 
 
+def download_common_voice_pl(output_dir: str, max_hours: float = None, cache_dir: str = None):
+    """
+    Download Mozilla Common Voice 11.0 (Polish) and prepare manifest files.
+    """
+    from datasets import load_dataset, Audio
+    import soundfile as sf
+    import numpy as np
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    audio_dir = output_path / "audio_cv_pl"
+    audio_dir.mkdir(exist_ok=True)
+    
+    print(f"📥 Downloading Common Voice 11.0 'pl' from HuggingFace...")
+    
+    # Authenticated access might be required for newer CV, assuming user has access or using older open version if issues arise
+    # CV 11.0 usually requires auth. If fails, user needs to login via `huggingface-cli login`.
+    
+    try:
+        # trust_remote_code is not needed/supported for canonical datasets usually
+        ds = load_dataset("mozilla-foundation/common_voice_11_0", "pl", split="train", cache_dir=cache_dir)
+        # Cast audio to 16kHz
+        ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+    except Exception as e:
+        print(f"❌ Error loading Common Voice 11.0: {e}")
+        print("🔄 Trying older version 'common_voice'...")
+        try:
+             ds = load_dataset("common_voice", "pl", split="train", cache_dir=cache_dir)
+             ds = ds.cast_column("audio", Audio(sampling_rate=16000))
+        except Exception as e2:
+             print(f"❌ Error loading fallback 'common_voice': {e2}")
+             return None, None
+
+    print(f"📊 Dataset size: {len(ds)} samples")
+
+    speaker_ids = set()
+    train_manifest = []
+    val_manifest = []
+    
+    total_duration = 0.0
+    max_duration_seconds = max_hours * 3600 if max_hours else float('inf')
+    
+    # Process
+    for i, sample in enumerate(tqdm(ds, desc="Processing Common Voice PL")):
+        audio_array = sample['audio']['array']
+        sr = sample['audio']['sampling_rate'] # Should be 16000 now
+        
+        duration = len(audio_array) / sr
+        
+        if total_duration >= max_duration_seconds:
+            print(f"⏱️ Reached max duration limit, stopping.")
+            break
+            
+        if duration < 1.0 or duration > 15.0:
+            continue
+            
+        client_id = sample['client_id']
+        # Shorten client_id for speaker_id
+        speaker_id = f"cv_{client_id[:12]}"
+        speaker_ids.add(speaker_id)
+        
+        filename = f"{speaker_id}_{i}.wav"
+        filepath = audio_dir / filename
+        
+        sf.write(str(filepath), audio_array, sr)
+        
+        entry = {
+            "audio_path": str(filepath),
+            "duration": duration,
+            "speaker_id": speaker_id,
+            "text": sample.get('sentence', '')
+        }
+        
+        # 95/5 split
+        if i % 20 == 0:
+            val_manifest.append(entry)
+        else:
+            train_manifest.append(entry)
+            
+        total_duration += duration
+        
+    # Save manifests
+    train_path = output_path / "cv_pl_train.json"
+    val_path = output_path / "cv_pl_val.json"
+    
+    with open(train_path, 'w') as f:
+        json.dump(train_manifest, f, indent=2)
+    
+    with open(val_path, 'w') as f:
+        json.dump(val_manifest, f, indent=2)
+        
+    print(f"\n✅ Prepared {len(train_manifest)} train, {len(val_manifest)} val samples from Common Voice PL")
+    return train_path, val_path
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Download/prepare LibriTTS dataset")
+    parser = argparse.ArgumentParser(description="Download/prepare datasets")
     parser.add_argument("--output-dir", type=str, default="/home/sperm/diff/data",
                        help="Output directory for audio and manifests")
+    parser.add_argument("--dataset", type=str, default="libritts", choices=["libritts", "common_voice_pl", "all"],
+                       help="Dataset to download")
     parser.add_argument("--subset", type=str, default="train-clean-100",
-                       choices=["train-clean-100", "train-clean-360", 
-                               "train-other-500", "dev-clean", "dev-other"],
                        help="LibriTTS subset to download")
     parser.add_argument("--max-hours", type=float, default=None,
                        help="Maximum hours to download (None = all)")
@@ -238,10 +334,14 @@ def main():
     
     args = parser.parse_args()
     
-    if args.existing_dir:
-        prepare_from_existing_libritts(args.existing_dir, args.output_dir)
-    else:
-        download_libritts(args.output_dir, args.subset, args.max_hours, args.cache_dir)
+    if args.dataset in ["libritts", "all"]:
+        if args.existing_dir:
+            prepare_from_existing_libritts(args.existing_dir, args.output_dir)
+        else:
+            download_libritts(args.output_dir, args.subset, args.max_hours, args.cache_dir)
+            
+    if args.dataset in ["common_voice_pl", "all"]:
+        download_common_voice_pl(args.output_dir, args.max_hours, args.cache_dir)
 
 if __name__ == "__main__":
     main()

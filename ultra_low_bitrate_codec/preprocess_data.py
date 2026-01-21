@@ -172,7 +172,11 @@ def precompute_features(
             )
             
             input_values = inputs.input_values.to(device)
-            attention_mask = inputs.attention_mask.to(device)
+            if hasattr(inputs, 'attention_mask') and inputs.attention_mask is not None:
+                attention_mask = inputs.attention_mask.to(device)
+            else:
+                # Create mask of 1s if not provided (assume full length)
+                attention_mask = torch.ones_like(input_values, dtype=torch.long, device=device)
             
             # Forward pass with mixed precision
             with torch.amp.autocast(device):
