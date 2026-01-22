@@ -2,6 +2,62 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class SnakeBeta(nn.Module):
+    """
+    SnakeBeta optimized for Transformers (B, T, D).
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(1, 1, dim))
+        self.beta = nn.Parameter(torch.ones(1, 1, dim))
+
+    def forward(self, x):
+        return x + (1.0 / (self.beta + 1e-9)) * torch.sin(self.alpha * x) ** 2
+
+class CustomFeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout=0.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            SnakeBeta(hidden_dim),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class CustomTransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        
+        self.ff = CustomFeedForward(d_model, dim_feedforward, dropout)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        # Self Attention
+        src2 = self.norm1(src)
+        # Note: src_mask in MultiheadAttention usually expects (L, L) or (B*H, L, L)
+        # For causal masking, attention ensures query doesn't attend to future keys.
+        # nn.TransformerEncoderLayer expects attn_mask.
+        # Check signature: forward(query, key, value, key_padding_mask=..., attn_mask=...)
+        # We use self_attn(src2, src2, src2, ...)
+        
+        # We need to handle the case where src_mask is provided
+        q = k = v = src2
+        attn_output, _ = self.self_attn(q, k, v, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)
+        src = src + self.dropout1(attn_output)
+        
+        # Feed Forward with SnakeBeta
+        src2 = self.norm2(src)
+        src = src + self.ff(src2)
+        return src
+
 class ProbabilisticLM(nn.Module):
     def __init__(self, num_tokens, dim, depth=2, heads=4, max_seq_len=4096):
         super().__init__()
@@ -10,8 +66,11 @@ class ProbabilisticLM(nn.Module):
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
         
-        layer = nn.TransformerEncoderLayer(d_model=dim, nhead=heads, dim_feedforward=dim*4, batch_first=True)
-        self.transformer = nn.TransformerEncoder(layer, num_layers=depth)
+        # Use custom layers
+        self.layers = nn.ModuleList([
+            CustomTransformerEncoderLayer(d_model=dim, nhead=heads, dim_feedforward=dim*4)
+            for _ in range(depth)
+        ])
         
         self.head = nn.Linear(dim, num_tokens)
         
@@ -26,9 +85,12 @@ class ProbabilisticLM(nn.Module):
         h = self.token_emb(x) + self.pos_emb(positions)
         
         # Causal Mask
+        # Transformer mask: (T, T). float('-inf') on positions to ignore (future)
         mask = torch.triu(torch.ones(T, T, device=x.device) * float('-inf'), diagonal=1)
         
-        h = self.transformer(h, mask=mask)
+        for layer in self.layers:
+            h = layer(h, src_mask=mask)
+            
         logits = self.head(h)
         return logits
 

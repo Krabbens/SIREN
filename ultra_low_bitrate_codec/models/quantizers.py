@@ -98,10 +98,11 @@ class ResidualFSQ(nn.Module):
         self.vocab_size = self.quantizers[0].vocab_size
         self.total_vocab_size = self.vocab_size ** num_levels
     
-    def forward(self, z):
+    def forward(self, z, num_levels=None):
         """
         Args:
             z: (B, T, D) input features
+            num_levels: (int) optional, limit number of RFSQ levels
         Returns:
             z_q: (B, T, D) quantized output
             loss: scalar quantization loss
@@ -118,7 +119,12 @@ class ResidualFSQ(nn.Module):
         total_loss = 0.0
         all_indices = []
         
+        max_levels = num_levels if num_levels is not None else len(self.quantizers)
+        
         for i, (quantizer, scale) in enumerate(zip(self.quantizers, self.residual_scales)):
+            if i >= max_levels:
+                break
+                
             # Quantize current residual
             z_q_level, loss_level, indices_level = quantizer(residual)
             

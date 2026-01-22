@@ -26,12 +26,44 @@ class SnakeBeta(nn.Module):
     """
     def __init__(self, channels):
         super().__init__()
-        self.alpha = nn.Parameter(torch.ones(1, channels, 1))
+        # Improve initialization: Log-scale distribution for alpha (frequencies)
+        # This helps cover the full audio spectrum from low to high freqs
+        # Similar to BigVGAN's specific initialization
+        
+        # Log-uniform distribution from 0.1 to 100
+        # This corresponds roughly to low-freq to high-freq features
+        zeros = torch.zeros(1, channels, 1)
+        self.alpha = nn.Parameter(zeros.normal_(0, 1).exp().abs() + 1e-9)
+        
+        # Beta controls amplitude, initialize to 1
         self.beta = nn.Parameter(torch.ones(1, channels, 1))
 
     def forward(self, x):
         return x + (1.0 / (self.beta + 1e-9)) * torch.sin(self.alpha * x) ** 2
 
+
+class SnakePhase(nn.Module):
+    """
+    SnakePhase activation (Centered).
+    Adds learnable phase shift (phi) to standard Snake, with centering correction.
+    Formula: x + (1/beta) * (sin^2(alpha * x + phi) - sin^2(phi))
+    Centering ensures f(0) = 0, improving stability and convergence.
+    """
+    def __init__(self, channels):
+        super().__init__()
+        # Log-scale init for frequencies (alpha)
+        zeros = torch.zeros(1, channels, 1)
+        self.alpha = nn.Parameter(zeros.normal_(0, 1).exp().abs() + 1e-9)
+        
+        # Learnable phase shift (phi)
+        self.phi = nn.Parameter(torch.empty(1, channels, 1).uniform_(-math.pi, math.pi))
+        
+        # Beta controls amplitude
+        self.beta = nn.Parameter(torch.ones(1, channels, 1))
+
+    def forward(self, x):
+        # Subtracting sin^2(phi) ensures f(0) = 0 (bias removal)
+        return x + (1.0 / (self.beta + 1e-9)) * (torch.sin(self.alpha * x + self.phi) ** 2 - torch.sin(self.phi) ** 2)
 
 class AudioEnhancer(nn.Module):
     """
