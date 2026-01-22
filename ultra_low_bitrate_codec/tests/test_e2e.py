@@ -6,7 +6,7 @@ import yaml
 import json
 
 # Add root to path
-sys.path.append('/home/sperm/diff')
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from ultra_low_bitrate_codec.models.encoder import SpeechEncoder
 from ultra_low_bitrate_codec.models.decoder import SpeechDecoder

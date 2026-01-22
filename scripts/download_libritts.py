@@ -198,7 +198,7 @@ def prepare_from_existing_libritts(libritts_dir: str, output_dir: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download/prepare LibriTTS dataset")
-    parser.add_argument("--output-dir", type=str, default="/home/sperm/diff/data",
+    parser.add_argument("--output-dir", type=str, default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"),
                        help="Output directory for audio and manifests")
     parser.add_argument("--subset", type=str, default="train-clean-100",
                        choices=["train-clean-100", "train-clean-360", 

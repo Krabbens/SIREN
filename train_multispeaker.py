@@ -17,7 +17,9 @@ import sys
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, '/home/sperm/diff')
+# Get project root directory
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, PROJECT_ROOT)
 
 from ultra_low_bitrate_codec.models.encoder import InformationFactorizerV2
 from ultra_low_bitrate_codec.models.decoder import SpeechDecoderV2
@@ -28,8 +30,8 @@ from ultra_low_bitrate_codec.data.feature_dataset import PrecomputedFeatureDatas
 from ultra_low_bitrate_codec.training.losses import MultiResolutionSTFTLoss, discriminator_loss, generator_loss
 
 # Configuration
-CONFIG_PATH = "/home/sperm/diff/ultra_low_bitrate_codec/configs/multispeaker.yaml"
-CHECKPOINT_DIR = "/home/sperm/diff/checkpoints_multispeaker"
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "ultra_low_bitrate_codec/configs/multispeaker.yaml")
+CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "checkpoints_multispeaker")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 with open(CONFIG_PATH, 'r') as f:

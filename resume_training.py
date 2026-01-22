@@ -16,7 +16,9 @@ import sys
 import os
 import random
 
-sys.path.insert(0, '/home/sperm/diff/ultra_low_bitrate_codec')
+# Get project root directory
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, 'ultra_low_bitrate_codec'))
 
 from models.encoder import InformationFactorizerV2 as InformationFactorizer
 from models.quantizers import ResidualFSQ, ProductQuantizer
@@ -29,8 +31,8 @@ import torchaudio
 import matplotlib.pyplot as plt
 from transformers import HubertModel, Wav2Vec2FeatureExtractor
 
-CONFIG_PATH = "/home/sperm/diff/ultra_low_bitrate_codec/configs/improved_ljspeech.yaml"
-CHECKPOINT_DIR = "/home/sperm/diff/checkpoints_v2"
+CONFIG_PATH = os.path.join(PROJECT_ROOT, "ultra_low_bitrate_codec/configs/improved_ljspeech.yaml")
+CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "checkpoints_v2")
 RESUME_STEP = 16500  # Najnowszy checkpoint V2
 
 with open(CONFIG_PATH, 'r') as f:
@@ -47,8 +49,8 @@ print("="*70)
 # ============================================================================
 # ZNAJDŹ PLIKI TESTOWE (spoza training set)
 # ============================================================================
-features_dir = "/home/sperm/diff/data/features_train"
-wav_dir = "/home/sperm/diff/data/LJSpeech-1.1/wavs"
+features_dir = os.path.join(PROJECT_ROOT, "data/features_train")
+wav_dir = os.path.join(PROJECT_ROOT, "data/LJSpeech-1.1/wavs")
 
 training_files = set(f.replace('.pt', '') for f in os.listdir(features_dir) if f.endswith('.pt'))
 all_wavs = set(f.replace('.wav', '') for f in os.listdir(wav_dir) if f.endswith('.wav'))
@@ -121,7 +123,7 @@ scaler = torch.amp.GradScaler('cuda')
 # DATA
 # ============================================================================
 train_ds = PrecomputedFeatureDataset(
-    feature_dir="/home/sperm/diff/data/features_train",
+    feature_dir=os.path.join(PROJECT_ROOT, "data/features_train"),
     manifest_path=config['data']['train_manifest'],
     max_frames=100
 )
@@ -221,7 +223,7 @@ print(f"📊 Resuming from step: {RESUME_STEP}")
 steps = RESUME_STEP
 pbar = tqdm(total=max_steps - RESUME_STEP, desc=f"Training from {RESUME_STEP}")
 
-log_file = open("/home/sperm/diff/training_resumed.log", "a")
+log_file = open(os.path.join(PROJECT_ROOT, "training_resumed.log"), "a")
 log_file.write(f"\n=== Resumed from step {RESUME_STEP} with validation ===\n")
 log_file.flush()
 

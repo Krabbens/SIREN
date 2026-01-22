@@ -98,9 +98,9 @@ training:
   save_every: 500
   
 data:
-  train_manifest: "/home/sperm/siren/SIREN/data/mixed_train.json"
-  val_manifest: "/home/sperm/siren/SIREN/data/mixed_val.json"
-  feature_dir: "/home/sperm/siren/SIREN/data/features_mixed"
+  train_manifest: "./data/mixed_train.json"
+  val_manifest: "./data/mixed_val.json"
+  feature_dir: "./data/features_mixed"
   sample_rate: 16000
   max_duration: 15.0
   min_duration: 1.0

@@ -82,9 +82,9 @@ training:
   
 data:
   # Multi-speaker dataset: LibriTTS + MLS Polish
-  train_manifest: "/home/sperm/diff/data/multispeaker_manifest_train.json"
-  val_manifest: "/home/sperm/diff/data/multispeaker_manifest_val.json"
-  feature_dir: "/home/sperm/diff/data/features_multispeaker"
+  train_manifest: "./data/multispeaker_manifest_train.json"
+  val_manifest: "./data/multispeaker_manifest_val.json"
+  feature_dir: "./data/features_multispeaker"
   sample_rate: 16000
   max_duration: 15.0
   min_duration: 1.0

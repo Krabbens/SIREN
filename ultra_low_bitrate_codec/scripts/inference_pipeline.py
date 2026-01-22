@@ -166,11 +166,18 @@ def plot_comparison(original_audio: torch.Tensor,
     return mse, corr
 
 
+# Get project root for default paths
+_SCRIPT_DIR = Path(__file__).parent.resolve()
+_PROJECT_ROOT = _SCRIPT_DIR.parent.parent
+_DEFAULT_CHECKPOINT_DIR = str(_PROJECT_ROOT / "checkpoints_v2")
+_DEFAULT_CONFIG = str(_PROJECT_ROOT / "ultra_low_bitrate_codec" / "configs" / "improved.yaml")
+_DEFAULT_OUTPUT = str(_PROJECT_ROOT / "ultra_low_bitrate_codec" / "inference_output")
+
 def run_inference(audio_path: str, 
-                  checkpoint_dir: str = "/home/sperm/diff/checkpoints_v2",
-                  config_path: str = "/home/sperm/diff/ultra_low_bitrate_codec/configs/improved.yaml",
+                  checkpoint_dir: str = _DEFAULT_CHECKPOINT_DIR,
+                  config_path: str = _DEFAULT_CONFIG,
                   step: int = 16500,
-                  output_dir: str = "/home/sperm/diff/ultra_low_bitrate_codec/inference_output"):
+                  output_dir: str = _DEFAULT_OUTPUT):
     """Run full inference pipeline."""
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -322,7 +329,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ultra-Low Bitrate Codec Inference")
     parser.add_argument('--audio', type=str, required=True, help='Path to input audio file')
     parser.add_argument('--step', type=int, default=16500, help='Checkpoint step')
-    parser.add_argument('--output', type=str, default='/home/sperm/diff/ultra_low_bitrate_codec/inference_output',
+    parser.add_argument('--output', type=str, default=_DEFAULT_OUTPUT,
                         help='Output directory')
     
     args = parser.parse_args()

@@ -10,7 +10,9 @@ import argparse
 import os
 import sys
 
-sys.path.append('/home/sperm/diff')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+sys.path.append(PROJECT_ROOT)
 
 from ultra_low_bitrate_codec.models.encoder import SpeechEncoder
 from ultra_low_bitrate_codec.models.quantizers import VectorQuantizer, ProductQuantizer
@@ -120,10 +122,14 @@ def main(audio_path, config_path, output_path):
     print("Saved audio files too!")
 
 if __name__ == "__main__":
+    DEFAULT_AUDIO = os.path.join(PROJECT_ROOT, 'data/LJSpeech-1.1/wavs/LJ001-0001.wav')
+    DEFAULT_CONFIG = os.path.join(PROJECT_ROOT, 'ultra_low_bitrate_codec/configs/default.yaml')
+    DEFAULT_OUTPUT = os.path.join(PROJECT_ROOT, 'spectrogram_comparison.png')
+    
     parser = argparse.ArgumentParser()
-    parser.add_argument('--audio', type=str, default='/home/sperm/diff/data/LJSpeech-1.1/wavs/LJ001-0001.wav')
-    parser.add_argument('--config', type=str, default='/home/sperm/diff/ultra_low_bitrate_codec/configs/default.yaml')
-    parser.add_argument('--output', type=str, default='/home/sperm/diff/spectrogram_comparison.png')
+    parser.add_argument('--audio', type=str, default=DEFAULT_AUDIO)
+    parser.add_argument('--config', type=str, default=DEFAULT_CONFIG)
+    parser.add_argument('--output', type=str, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
     
     main(args.audio, args.config, args.output)

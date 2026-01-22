@@ -120,4 +120,4 @@ if __name__ == "__main__":
     parser.add_argument('--step', type=int, default=3000)
     args = parser.parse_args()
     
-    generate('ultra_low_bitrate_codec/configs/default.yaml', '/home/sperm/diff/data/features_train', args.step)
+    generate('ultra_low_bitrate_codec/configs/default.yaml', os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'data/features_train'), args.step)

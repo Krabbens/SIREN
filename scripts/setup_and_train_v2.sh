@@ -10,11 +10,15 @@
 
 set -e  # Exit on error
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 # Configuration
-DATA_DIR="/home/sperm/diff/data"
-SCRIPTS_DIR="/home/sperm/diff/scripts"
-CONFIG="/home/sperm/diff/ultra_low_bitrate_codec/configs/improved.yaml"
-CHECKPOINT_DIR="/home/sperm/diff/checkpoints_v2"
+DATA_DIR="${PROJECT_ROOT}/data"
+SCRIPTS_DIR="${PROJECT_ROOT}/scripts"
+CONFIG="${PROJECT_ROOT}/ultra_low_bitrate_codec/configs/improved.yaml"
+CHECKPOINT_DIR="${PROJECT_ROOT}/checkpoints_v2"
 FEATURES_DIR="${DATA_DIR}/features_libritts"
 
 # Color output
@@ -35,7 +39,7 @@ echo -e "\n${YELLOW}📥 STEP 1: Downloading LibriTTS...${NC}"
 if [ -f "${DATA_DIR}/libritts_train.json" ]; then
     echo -e "${GREEN}✓ LibriTTS manifest already exists, skipping download${NC}"
 else
-    cd /home/sperm/diff
+    cd "${PROJECT_ROOT}"
     source .venv/bin/activate
     
     # Install dependencies if needed
@@ -63,7 +67,7 @@ if [ "$(ls -A ${FEATURES_DIR} 2>/dev/null | head -1)" ]; then
 else
     echo "Extracting features (this may take a while)..."
     
-    cd /home/sperm/diff
+    cd "${PROJECT_ROOT}"
     source .venv/bin/activate
     
     python ${SCRIPTS_DIR}/precompute_features.py \
@@ -93,7 +97,7 @@ echo -e "\n${YELLOW}🚀 STEP 4: Starting training...${NC}"
 
 mkdir -p ${CHECKPOINT_DIR}
 
-cd /home/sperm/diff
+cd "${PROJECT_ROOT}"
 source .venv/bin/activate
 
 echo "Training will start with:"

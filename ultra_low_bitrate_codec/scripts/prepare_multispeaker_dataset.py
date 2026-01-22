@@ -334,11 +334,16 @@ def combine_manifests(manifests: list, output_path: str, train_ratio: float = 0.
 
 
 def main():
+    SCRIPT_DIR = Path(__file__).parent.resolve()
+    PROJECT_ROOT = SCRIPT_DIR.parent.parent
+    DEFAULT_DATA = str(PROJECT_ROOT / "data")
+    DEFAULT_LIBRITTS = str(PROJECT_ROOT / "data" / "LibriTTS" / "train-clean-100")
+    
     parser = argparse.ArgumentParser(description="Prepare multi-speaker dataset")
-    parser.add_argument("--data-dir", type=str, default="/home/sperm/diff/data",
+    parser.add_argument("--data-dir", type=str, default=DEFAULT_DATA,
                         help="Base data directory")
     parser.add_argument("--libritts-dir", type=str, 
-                        default="/home/sperm/diff/data/LibriTTS/train-clean-100",
+                        default=DEFAULT_LIBRITTS,
                         help="LibriTTS directory")
     parser.add_argument("--cv-samples", type=int, default=5000,
                         help="Number of CommonVoice Polish samples to download")

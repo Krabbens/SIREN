@@ -351,7 +351,7 @@ class FastTrainer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='ultra_low_bitrate_codec/configs/default.yaml')
-    parser.add_argument('--features', type=str, default='/home/sperm/diff/data/features_train')
+    parser.add_argument('--features', type=str, default=os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'data/features_train'))
     args = parser.parse_args()
     
     trainer = FastTrainer(args.config, args.features)

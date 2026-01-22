@@ -319,7 +319,7 @@ def download_common_voice_pl(output_dir: str, max_hours: float = None, cache_dir
 
 def main():
     parser = argparse.ArgumentParser(description="Download/prepare datasets")
-    parser.add_argument("--output-dir", type=str, default="/home/sperm/diff/data",
+    parser.add_argument("--output-dir", type=str, default=str(Path(__file__).parent.parent.resolve() / "data"),
                        help="Output directory for audio and manifests")
     parser.add_argument("--dataset", type=str, default="libritts", choices=["libritts", "common_voice_pl", "all"],
                        help="Dataset to download")

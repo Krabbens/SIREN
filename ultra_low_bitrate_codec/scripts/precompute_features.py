@@ -58,9 +58,14 @@ def precompute_features(manifest_path, output_dir, model_name="ntu-spml/distilhu
     print(f"Done! Features saved to {output_dir}")
 
 if __name__ == "__main__":
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+    DEFAULT_MANIFEST = os.path.join(PROJECT_ROOT, 'data/train.json')
+    DEFAULT_OUTPUT = os.path.join(PROJECT_ROOT, 'data/features')
+    
     parser = argparse.ArgumentParser()
-    parser.add_argument('--manifest', type=str, default='/home/sperm/diff/data/train.json')
-    parser.add_argument('--output', type=str, default='/home/sperm/diff/data/features')
+    parser.add_argument('--manifest', type=str, default=DEFAULT_MANIFEST)
+    parser.add_argument('--output', type=str, default=DEFAULT_OUTPUT)
     parser.add_argument('--model', type=str, default='ntu-spml/distilhubert')
     parser.add_argument('--layer', type=int, default=4)
     args = parser.parse_args()
