@@ -46,19 +46,21 @@ class LearnableUpsampler(nn.Module):
         super().__init__()
         self.factor = factor
         
-        # Main upsampling path
-        self.upsample = nn.ConvTranspose1d(
+        from .bitlinear import BitConvTranspose1d, BitConv1d
+        
+        # Main upsampling path (BitNet)
+        self.upsample = BitConvTranspose1d(
             input_dim, output_dim,
             kernel_size=factor * 2,
             stride=factor,
             padding=factor // 2
         )
         
-        # Refinement convolution
+        # Refinement convolution (BitNet)
         self.refine = nn.Sequential(
-            nn.Conv1d(output_dim, output_dim, kernel_size=7, padding=3),
+            BitConv1d(output_dim, output_dim, kernel_size=7, padding=3),
             nn.SiLU(),
-            nn.Conv1d(output_dim, output_dim, kernel_size=7, padding=3)
+            BitConv1d(output_dim, output_dim, kernel_size=7, padding=3)
         )
         
         self.norm = nn.LayerNorm(output_dim)
@@ -83,6 +85,8 @@ class CrossAttentionFusion(nn.Module):
         self.norm_sem = nn.LayerNorm(dim)
         self.norm_pro = nn.LayerNorm(dim)
         
+        from .bitlinear import BitLinear
+        
         # Semantic attends to prosody
         self.cross_attn = nn.MultiheadAttention(
             dim, num_heads, dropout=dropout, batch_first=True
@@ -90,10 +94,10 @@ class CrossAttentionFusion(nn.Module):
         
         self.ff = nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim, dim * 4),
+            BitLinear(dim, dim * 4),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
+            BitLinear(dim * 4, dim),
             nn.Dropout(dropout)
         )
         
@@ -148,18 +152,21 @@ class FeatureReconstructorV2(nn.Module):
             factor=pro_cfg['temporal_compression']
         )
         
-        # Speaker projection
+        from .bitlinear import BitLinear
+        
+        # Speaker projection (BitNet)
         self.spk_proj = nn.Sequential(
-            nn.Linear(spk_cfg['embedding_dim'], fusion_dim // 4),
+            BitLinear(spk_cfg['embedding_dim'], fusion_dim // 4),
             nn.SiLU(),
-            nn.Linear(fusion_dim // 4, fusion_dim // 4)
+            BitLinear(fusion_dim // 4, fusion_dim // 4)
         )
         
         # ========================================
         # FUSION
         # ========================================
         # Initial concat: (fusion_dim//2 + fusion_dim//4 + fusion_dim//4) = fusion_dim
-        self.fusion_proj = nn.Linear(fusion_dim, fusion_dim)
+        # Initial concat: (fusion_dim//2 + fusion_dim//4 + fusion_dim//4) = fusion_dim
+        self.fusion_proj = BitLinear(fusion_dim, fusion_dim)
         
         # Cross-attention between semantic and prosody
         self.cross_fusion = CrossAttentionFusion(
@@ -185,11 +192,12 @@ class FeatureReconstructorV2(nn.Module):
         )
         
         # Output projection (to vocoder input dim)
+        # Output projection (to vocoder input dim)
         self.output_proj = nn.Sequential(
             nn.LayerNorm(fusion_dim),
-            nn.Linear(fusion_dim, fusion_dim),
+            BitLinear(fusion_dim, fusion_dim),
             nn.GELU(),
-            nn.Linear(fusion_dim, fusion_dim)  # Keep at fusion_dim for vocoder
+            BitLinear(fusion_dim, fusion_dim)  # Keep at fusion_dim for vocoder
         )
 
     def forward(self, sem_z, pro_z, spk_z, target_len=None):

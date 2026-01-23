@@ -113,21 +113,80 @@ class BitResidualBlock(nn.Module):
 
 class BitInstantaneousFrequencyHead(nn.Module):
     """
-    Phase prediction via instantaneous frequency with BitLinear.
+    Improved phase prediction via instantaneous frequency with per-frequency weights.
+    
+    Fixes banding issue: The original single scalar cumsum_weight caused systematic
+    phase errors at specific frequency bins. Per-frequency weights allow the model
+    to learn appropriate integration rates for each bin independently.
+    
+    Also adds:
+    - Per-frequency learnable biases for phase initialization
+    - Smooth phase wrapping to avoid discontinuities
     """
-    def __init__(self, input_dim: int, output_dim: int):
+    def __init__(self, input_dim: int, output_dim: int, num_heads: int = 4):
         super().__init__()
-        self.proj = BitLinear(input_dim, output_dim)
-        self.cumsum_weight = nn.Parameter(torch.ones(1) * 0.1)
+        self.output_dim = output_dim
+        self.num_heads = num_heads
+        
+        # Multi-head projection for richer phase representation
+        self.proj = BitLinear(input_dim, output_dim * num_heads)
+        
+        # Per-frequency cumsum weights (key fix for banding)
+        # Initialize with different values for low/mid/high frequencies
+        init_weights = torch.linspace(0.05, 0.2, output_dim)
+        self.cumsum_weight = nn.Parameter(init_weights.unsqueeze(0))  # (1, output_dim)
+        
+        # Per-frequency phase offset
+        self.phase_bias = nn.Parameter(torch.zeros(1, 1, output_dim))
+        
+        # Head combination weights
+        self.head_weights = nn.Parameter(torch.ones(num_heads) / num_heads)
+        
+        # Optional smoothing across frequencies (anti-banding)
+        self.smooth_kernel = nn.Parameter(torch.tensor([0.1, 0.2, 0.4, 0.2, 0.1]))
     
     def forward(self, x):
-        # x: (B, T, C)
-        inst_freq = self.proj(x)
+        """
+        Args:
+            x: (B, T, C) input features
+        Returns:
+            phase: (B, T, output_dim) wrapped phase values in [-π, π]
+        """
+        B, T, _ = x.shape
+        
+        # Project to multi-head instantaneous frequency
+        inst_freq = self.proj(x)  # (B, T, output_dim * num_heads)
+        inst_freq = inst_freq.view(B, T, self.num_heads, self.output_dim)
+        
+        # Combine heads with learned weights
+        inst_freq = (inst_freq * F.softmax(self.head_weights, dim=0).view(1, 1, -1, 1)).sum(dim=2)
+        
+        # Limit range and apply per-frequency weights
         inst_freq = torch.tanh(inst_freq) * np.pi
         
+        # Per-frequency integration rate (key anti-banding fix)
+        weighted_freq = inst_freq * self.cumsum_weight  # (B, T, output_dim)
+        
         # Integrate to get phase
-        phase = torch.cumsum(inst_freq * self.cumsum_weight, dim=1)
-        phase = torch.remainder(phase + np.pi, 2 * np.pi) - np.pi
+        phase = torch.cumsum(weighted_freq, dim=1)
+        
+        # Add learnable phase offset
+        phase = phase + self.phase_bias
+        
+        # Smooth across frequency dimension to reduce banding (optional)
+        # Uses 1D conv along frequency axis
+        phase_smooth = phase.transpose(1, 2)  # (B, output_dim, T)
+        kernel = self.smooth_kernel.view(1, 1, -1).to(phase.device)
+        phase_smooth = F.conv1d(
+            phase_smooth, 
+            kernel.expand(self.output_dim, 1, -1),
+            padding=2, 
+            groups=self.output_dim
+        )
+        phase = phase_smooth.transpose(1, 2)  # (B, T, output_dim)
+        
+        # Wrap to [-π, π] (smooth version using atan2)
+        phase = torch.atan2(torch.sin(phase), torch.cos(phase))
         
         return phase
 

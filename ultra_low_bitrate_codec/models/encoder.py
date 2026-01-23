@@ -15,7 +15,9 @@ class RateReduction(nn.Module):
     def __init__(self, input_dim, output_dim, factor):
         super().__init__()
         self.factor = factor
-        self.conv = nn.Conv1d(
+        from .bitlinear import BitConv1d
+        
+        self.conv = BitConv1d(
             input_dim, output_dim,
             kernel_size=factor * 2,
             stride=factor,
@@ -37,13 +39,15 @@ class ConformerBlock(nn.Module):
     def __init__(self, dim, num_heads=4, kernel_size=31, dropout=0.1):
         super().__init__()
         
+        from .bitlinear import BitLinear, BitConv1d
+        
         # Feed-forward 1
         self.ff1 = nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim, dim * 4),
+            BitLinear(dim, dim * 4),
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
+            BitLinear(dim * 4, dim),
             nn.Dropout(dropout)
         )
         
@@ -55,22 +59,22 @@ class ConformerBlock(nn.Module):
         # Convolution module
         self.conv_norm = nn.LayerNorm(dim)
         self.conv = nn.Sequential(
-            nn.Conv1d(dim, dim * 2, 1),  # Pointwise expansion
+            BitConv1d(dim, dim * 2, 1),  # Pointwise expansion
             nn.GLU(dim=1),                # Gated Linear Unit
-            nn.Conv1d(dim, dim, kernel_size, padding=kernel_size // 2, groups=dim),  # Depthwise
+            BitConv1d(dim, dim, kernel_size, padding=kernel_size // 2, groups=dim),  # Depthwise
             nn.BatchNorm1d(dim),
             nn.SiLU(),
-            nn.Conv1d(dim, dim, 1),       # Pointwise
+            BitConv1d(dim, dim, 1),       # Pointwise
             nn.Dropout(dropout)
         )
         
         # Feed-forward 2
         self.ff2 = nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim, dim * 4),
+            BitLinear(dim, dim * 4),
             nn.SiLU(),
             nn.Dropout(dropout),
-            nn.Linear(dim * 4, dim),
+            BitLinear(dim * 4, dim),
             nn.Dropout(dropout)
         )
         
@@ -114,20 +118,24 @@ class InformationFactorizerV2(nn.Module):
         # ========================================
         # SPEAKER BRANCH (Global)
         # ========================================
+        # Note: Speaker encoder kept high precision or BitLinear?
+        # User wants "everything 1bit", so we use BitLinear where possible.
+        from .bitlinear import BitLinear
+        
         self.speaker_encoder = nn.Sequential(
-            nn.Linear(input_dim, 512),
+            BitLinear(input_dim, 512),
             nn.LayerNorm(512),
             nn.SiLU(),
-            nn.Linear(512, spk_cfg['embedding_dim'])
+            BitLinear(512, spk_cfg['embedding_dim'])
         )
         # Attention pooling
         self.speaker_attn = nn.Sequential(
-            nn.Linear(input_dim, 1),
+            BitLinear(input_dim, 1),
             nn.Softmax(dim=1)
         )
         
         # Speaker projection for removal from content
-        self.speaker_to_content = nn.Linear(spk_cfg['embedding_dim'], input_dim)
+        self.speaker_to_content = BitLinear(spk_cfg['embedding_dim'], input_dim)
         
         # ========================================
         # SEMANTIC BRANCH
@@ -140,9 +148,9 @@ class InformationFactorizerV2(nn.Module):
             sem_cfg['hidden_dim'], num_heads=4, kernel_size=15
         )
         self.semantic_proj = nn.Sequential(
-            nn.Linear(sem_cfg['hidden_dim'], sem_cfg['hidden_dim']),
+            BitLinear(sem_cfg['hidden_dim'], sem_cfg['hidden_dim']),
             nn.SiLU(),
-            nn.Linear(sem_cfg['hidden_dim'], sem_cfg['output_dim']),
+            BitLinear(sem_cfg['hidden_dim'], sem_cfg['output_dim']),
             nn.LayerNorm(sem_cfg['output_dim'])
         )
         
@@ -157,9 +165,9 @@ class InformationFactorizerV2(nn.Module):
             pro_cfg['hidden_dim'], num_heads=4, kernel_size=31
         )
         self.prosody_proj = nn.Sequential(
-            nn.Linear(pro_cfg['hidden_dim'], pro_cfg['hidden_dim']),
+            BitLinear(pro_cfg['hidden_dim'], pro_cfg['hidden_dim']),
             nn.SiLU(),
-            nn.Linear(pro_cfg['hidden_dim'], pro_cfg['output_dim']),
+            BitLinear(pro_cfg['hidden_dim'], pro_cfg['output_dim']),
             nn.LayerNorm(pro_cfg['output_dim'])
         )
         

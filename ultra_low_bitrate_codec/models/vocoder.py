@@ -16,13 +16,15 @@ class ConvNeXtBlock(nn.Module):
     """Enhanced ConvNeXt block with optional dilation"""
     def __init__(self, dim, intermediate_dim, dilation=1, layer_scale_init_value=1e-6):
         super().__init__()
+        from .bitlinear import BitConv1d, BitLinear
+        
         padding = (7 + (dilation - 1) * 6) // 2  # Maintain receptive field
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=padding, 
+        self.dwconv = BitConv1d(dim, dim, kernel_size=7, padding=padding, 
                                 groups=dim, dilation=dilation)
         self.norm = nn.LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, intermediate_dim)
+        self.pwconv1 = BitLinear(dim, intermediate_dim)
         self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(intermediate_dim, dim)
+        self.pwconv2 = BitLinear(intermediate_dim, dim)
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)), 
                                   requires_grad=True) if layer_scale_init_value > 0 else None
 
@@ -44,14 +46,16 @@ class ResidualBlock(nn.Module):
     """Residual block with dilated convolutions for spectral coherence"""
     def __init__(self, channels, kernel_size=3, dilations=(1, 3, 5)):
         super().__init__()
+        from .bitlinear import BitConv1d
+        
         self.convs = nn.ModuleList()
         for d in dilations:
             self.convs.append(
                 nn.Sequential(
-                    nn.Conv1d(channels, channels, kernel_size, 
+                    BitConv1d(channels, channels, kernel_size, 
                              padding=d * (kernel_size - 1) // 2, dilation=d),
                     nn.LeakyReLU(0.1),
-                    nn.Conv1d(channels, channels, kernel_size, padding=(kernel_size - 1) // 2),
+                    BitConv1d(channels, channels, kernel_size, padding=(kernel_size - 1) // 2),
                 )
             )
     
@@ -68,7 +72,8 @@ class InstantaneousFrequencyHead(nn.Module):
     """
     def __init__(self, input_dim, output_dim):
         super().__init__()
-        self.proj = nn.Linear(input_dim, output_dim)
+        from .bitlinear import BitLinear
+        self.proj = BitLinear(input_dim, output_dim)
         self.cumsum_weight = nn.Parameter(torch.ones(1) * 0.1)  # Learnable integration rate
         
     def forward(self, x):
@@ -99,9 +104,11 @@ class VocosGeneratorV2(nn.Module):
         self.hop_length = hop_length
         self.input_dim = input_dim
         
+        from .bitlinear import BitConv1d, BitLinear
+        
         # Initial projection
         self.pad = nn.ReflectionPad1d(3)
-        self.conv_in = nn.Conv1d(input_dim, dim, kernel_size=7, padding=0)
+        self.conv_in = BitConv1d(input_dim, dim, kernel_size=7, padding=0)
         
         # Multi-scale ConvNeXt backbone with varying dilations
         self.backbone = nn.ModuleList()
@@ -116,7 +123,7 @@ class VocosGeneratorV2(nn.Module):
         ])
         
         # Skip connection from input
-        self.skip_proj = nn.Conv1d(input_dim, dim, kernel_size=1)
+        self.skip_proj = BitConv1d(input_dim, dim, kernel_size=1)
         
         self.norm = nn.LayerNorm(dim, eps=1e-6)
         
@@ -125,9 +132,9 @@ class VocosGeneratorV2(nn.Module):
         
         # Magnitude prediction (log-scale for stability)
         self.mag_head = nn.Sequential(
-            nn.Linear(dim, dim),
+            BitLinear(dim, dim),
             nn.GELU(),
-            nn.Linear(dim, self.out_dim)
+            BitLinear(dim, self.out_dim)
         )
         
         # Phase prediction using Instantaneous Frequency

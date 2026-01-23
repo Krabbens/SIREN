@@ -1,0 +1,110 @@
+# Ultra-Low Bitrate Config (~200 bps target) - LARGE MODEL, NO GAN
+# Strategy: Maximize capacity and spectral accuracy to improve MOS
+
+model:
+  # Feature Extractor
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  
+  # =========================================
+  # QUANTIZER - 195 bps (Verified)
+  # =========================================
+  quantizer_type: "rfsq"
+  fsq_levels: [6, 6, 6, 6, 6, 6]  # 6 dims
+  rfsq_num_levels: 2  # 2 residual levels
+  
+  # =========================================
+  # SEMANTIC - 195 bps settings
+  # =========================================
+  semantic:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 6
+    temporal_compression: 6  # 8.3Hz
+    vocab_size: 256
+    
+  # =========================================
+  # PROSODY - 195 bps settings
+  # =========================================
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 6
+    temporal_compression: 16  # 3.125Hz
+    vocab_size: 256
+    
+  # Speaker
+  speaker:
+    embedding_dim: 128
+    num_groups: 4
+    codes_per_group: 64
+    
+  # Entropy Coding
+  entropy:
+    enabled: true
+    lm_layers: 2
+    lm_dim: 128
+    lm_heads: 4
+    context_length: 64
+    vocab_size: 256
+    
+  # Decoder - HIGH CAPACITY
+  decoder:
+    fusion_dim: 512     # High capacity
+    fusion_heads: 8
+    fusion_layers: 6
+    dropout: 0.1
+        
+  # Vocoder - HIGH CAPACITY
+  vocoder:
+    type: "bitvocoder"
+    dim: 512            # High capacity
+    num_convnext_layers: 12
+    num_res_blocks: 4
+
+training:
+  batch_size: 16
+  learning_rate: 5e-5  # Low LR for stability
+  warmup_steps: 2000
+  max_steps: 150000    # Longer training for convergence
+  num_workers: 0
+  persistent_workers: false
+  
+  use_gan: false       # NO GAN (User request)
+  
+  # VQ/FSQ
+  commitment_weight: 0.25
+  
+  # Loss weights - AGGRESSIVE SPECTRAL MATCHING
+  stft_weight: 15.0             # Very high (was 5.0)
+  bandwise_mel_weight: 10.0     # Very high (was 3.0)
+  waveform_weight: 2.0          # Phase alignment
+  spectral_flux_weight: 2.0     # Temporal smoothness
+  
+  # Diversity loss for anti-banding
+  diversity_weight: 0.1
+  
+  entropy_weight: 0.01
+  
+  # SHARPENER - Enhance high frequencies without GAN
+  sharpener_enabled: true
+  
+  log_every: 100
+  eval_every: 3000
+  save_every: 500
+  
+data:
+  train_manifest: "./data/mixed_train.json"
+  val_manifest: "./data/mixed_val.json"
+  feature_dir: "./data/features_mixed"
+  sample_rate: 16000
+  max_duration: 15.0
+  min_duration: 1.0
+  
+  multi_speaker: true
+  num_speakers: -1
+
+audio:
+  sample_rate: 16000
+  hop_length: 320

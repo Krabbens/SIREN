@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from ultra_low_bitrate_codec.models.bit_vocoder import BitVocoder
 from ultra_low_bitrate_codec.models.vocoder import NeuralVocoderV2
-from ultra_low_bitrate_codec.training.losses import MultiResolutionSTFTLoss
+from ultra_low_bitrate_codec.training.losses import MultiResolutionSTFTLoss, SnakeBetaDiversityLoss
 
 
 class MelSpectrogramLoss(nn.Module):
@@ -193,8 +193,9 @@ def extract_features_with_teacher(teacher_model, audio, device):
 
 
 def train_epoch(model, teacher_model, dataloader, optimizer, scheduler, 
-                mel_loss_fn, stft_loss_fn, device, epoch, writer):
-    """Train for one epoch with knowledge distillation."""
+                mel_loss_fn, stft_loss_fn, diversity_loss_fn, device, epoch, writer,
+                diversity_weight=0.1):
+    """Train for one epoch with knowledge distillation and anti-banding regularization."""
     model.train()
     if teacher_model is not None:
         teacher_model.eval()
@@ -215,7 +216,7 @@ def train_epoch(model, teacher_model, dataloader, optimizer, scheduler,
             audio = batch.to(device)
             # Generate random features (in production, use precomputed)
             T = audio.shape[-1] // 320
-            features = torch.randn(audio.shape[0], 256, T, device=device)
+            features = torch.randn(audio.shape[0], 512, T, device=device)  # Match vocoder input_dim
         
         optimizer.zero_grad()
         
@@ -239,6 +240,13 @@ def train_epoch(model, teacher_model, dataloader, optimizer, scheduler,
             stft_loss = torch.tensor(0.0, device=device)
         
         loss = mel_loss + stft_loss
+        
+        # SnakeBeta alpha diversity regularization (anti-banding)
+        if diversity_loss_fn is not None:
+            div_loss = diversity_loss_fn(model)
+            loss = loss + diversity_weight * div_loss
+        else:
+            div_loss = torch.tensor(0.0, device=device)
         
         # Knowledge distillation from teacher
         distill_loss = torch.tensor(0.0, device=device)
@@ -269,7 +277,7 @@ def train_epoch(model, teacher_model, dataloader, optimizer, scheduler,
         pbar.set_postfix({
             'loss': f'{loss.item():.4f}',
             'mel': f'{mel_loss.item():.4f}',
-            'stft': f'{stft_loss.item():.4f}'
+            'div': f'{div_loss.item():.4f}'
         })
         
         # Log to tensorboard
@@ -279,6 +287,7 @@ def train_epoch(model, teacher_model, dataloader, optimizer, scheduler,
             writer.add_scalar('train/mel_loss', mel_loss.item(), global_step)
             writer.add_scalar('train/stft_loss', stft_loss.item(), global_step)
             writer.add_scalar('train/distill_loss', distill_loss.item(), global_step)
+            writer.add_scalar('train/diversity_loss', div_loss.item(), global_step)
     
     # Step scheduler
     if scheduler is not None:
@@ -401,13 +410,15 @@ def main():
         dataset, 
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=0,  # Use 0 to avoid multiprocessing issues
         pin_memory=True
     )
     
     # Losses
     mel_loss_fn = MelSpectrogramLoss().to(device)
     stft_loss_fn = MultiResolutionSTFTLoss().to(device)
+    diversity_loss_fn = SnakeBetaDiversityLoss(target_log_std=1.5, target_log_mean=1.0)
+    print("Using SnakeBeta diversity regularization for anti-banding")
     
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -435,7 +446,8 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         metrics = train_epoch(
             model, teacher_model, dataloader, optimizer, scheduler,
-            mel_loss_fn, stft_loss_fn, device, epoch, writer
+            mel_loss_fn, stft_loss_fn, diversity_loss_fn, device, epoch, writer,
+            diversity_weight=0.1
         )
         
         print(f"\nEpoch {epoch}: loss={metrics['loss']:.4f}, "

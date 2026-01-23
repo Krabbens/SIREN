@@ -165,11 +165,11 @@ def main():
         train_ds, 
         batch_size=config['training']['batch_size'], 
         shuffle=True,
-        num_workers=config['training']['num_workers'], 
+        num_workers=config['training'].get('num_workers', 0), 
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=config['training'].get('persistent_workers', False) and config['training'].get('num_workers', 0) > 0
     )
-    val_dl = DataLoader(val_ds, batch_size=4, shuffle=True, num_workers=2, pin_memory=True)
+    val_dl = DataLoader(val_ds, batch_size=4, shuffle=True, num_workers=0, pin_memory=True)
 
     # =========================================================================
     # LOSSES (Balanced Suite)

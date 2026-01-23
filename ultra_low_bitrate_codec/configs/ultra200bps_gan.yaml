@@ -1,0 +1,118 @@
+# Ultra-Low Bitrate Config (~200 bps target) with GAN
+# Phase 3: Optimizing Quality (GAN + Larger Model)
+
+model:
+  # Feature Extractor
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  
+  # =========================================
+  # QUANTIZER - SAME AS PHASE 2 (195-213 bps)
+  # =========================================
+  quantizer_type: "rfsq"
+  # 6 dims × 6 levels = 2.58 bits per dim
+  fsq_levels: [6, 6, 6, 6, 6, 6]  # 6 dims
+  rfsq_num_levels: 2  # 2 residual levels
+  
+  # =========================================
+  # SEMANTIC - SAME AS PHASE 2
+  # Target: 6 dims × 2.58 bits × 2 levels × 8.3Hz = 258 bps raw
+  # =========================================
+  semantic:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 6       # 6 dims
+    temporal_compression: 6  # 50Hz/6 = 8.3Hz (reduced from 5)
+    vocab_size: 256
+    
+  # =========================================
+  # PROSODY - SAME AS PHASE 2  
+  # Target: 6 dims × 2.58 bits × 2 levels × 3.125Hz = 97 bps raw
+  # =========================================
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 6       # 6 dims
+    temporal_compression: 16  # 50Hz/16 = 3.125Hz (was 20)
+    vocab_size: 256
+    
+  # Speaker (one-time cost, negligible)
+  speaker:
+    embedding_dim: 128
+    num_groups: 4
+    codes_per_group: 64
+    
+  # Entropy Coding
+  entropy:
+    enabled: true
+    lm_layers: 2
+    lm_dim: 128
+    lm_heads: 4
+    context_length: 64
+    vocab_size: 256
+    
+  # Decoder (Fusion) - INCREASED CAPACITY
+  decoder:
+    fusion_dim: 512     # INCREASED from 256
+    fusion_heads: 8     # INCREASED from 4
+    fusion_layers: 6    # INCREASED from 3
+    dropout: 0.1
+        
+  # Vocoder - Using BitVocoder with INCREASED CAPACITY
+  vocoder:
+    type: "bitvocoder"
+    dim: 512            # INCREASED from 256
+    num_convnext_layers: 12 # INCREASED from 8
+    num_res_blocks: 4   # INCREASED from 3
+
+training:
+  batch_size: 16
+  learning_rate: 5e-5
+  warmup_steps: 2000
+  max_steps: 100000
+  num_workers: 0
+  persistent_workers: false
+  
+  use_gan: true       # ENABLED GAN
+  
+  # VQ/FSQ
+  commitment_weight: 0.25
+  
+  # Loss weights - TUNED FOR QUALITY
+  stft_weight: 10.0             # INCREASED from 5.0 (Prioritize spectral)
+  bandwise_mel_weight: 5.0      # INCREASED from 3.0
+  waveform_weight: 1.0
+  spectral_flux_weight: 1.0     # INCREASED from 0.5
+  
+  speaker_loss_weight: 0.0
+  phase_loss_weight: 0.0
+  mfcc_weight: 0.0
+  multi_mel_weight: 0.0
+  feature_loss_weight: 0.0
+  mel_weight: 0.0
+  
+  # SnakeBeta diversity regularization (anti-banding)
+  diversity_weight: 0.1
+  
+  entropy_weight: 0.01
+  sharpener_enabled: false
+  
+  log_every: 100
+  eval_every: 3000
+  save_every: 500
+  
+data:
+  train_manifest: "./data/mixed_train.json"
+  val_manifest: "./data/mixed_val.json"
+  feature_dir: "./data/features_mixed"
+  sample_rate: 16000
+  max_duration: 15.0
+  min_duration: 1.0
+  
+  multi_speaker: true
+  num_speakers: -1
+
+audio:
+  sample_rate: 16000
+  hop_length: 320

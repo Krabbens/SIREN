@@ -223,3 +223,72 @@ class PhaseAwareLoss(nn.Module):
         
         min_t = min(x_gd.shape[-1], y_gd.shape[-1])
         return F.l1_loss(x_gd[..., :min_t], y_gd[..., :min_t])
+
+
+# =============================================================================
+# REGULARIZATION LOSSES
+# =============================================================================
+
+class SnakeBetaDiversityLoss(nn.Module):
+    """
+    Regularization loss to prevent SnakeBeta alpha parameters from clustering.
+    
+    Problem: When alpha values cluster (e.g., 67% in [1.04, 1.11]), SnakeBeta
+    activations add harmonics at nearly identical frequencies, causing 
+    horizontal banding artifacts in spectrograms.
+    
+    Solution: Encourage log-uniform spread of alpha values across the model.
+    This ensures diverse frequency responses from sin²(αx) terms.
+    
+    Loss = -std(log(α)) + (mean(log(α)) - target_mean)² + entropy_penalty
+    """
+    
+    def __init__(self, target_log_std: float = 1.5, target_log_mean: float = 1.0,
+                 entropy_weight: float = 0.1):
+        super().__init__()
+        self.target_log_std = target_log_std
+        self.target_log_mean = target_log_mean
+        self.entropy_weight = entropy_weight
+    
+    def forward(self, model: nn.Module) -> torch.Tensor:
+        """
+        Compute alpha diversity loss for all SnakeBeta modules in model.
+        
+        Args:
+            model: Model containing SnakeBeta layers
+        Returns:
+            Scalar loss encouraging alpha diversity
+        """
+        from ..models.post_net import SnakeBeta, SnakePhase
+        
+        alphas = []
+        for m in model.modules():
+            if isinstance(m, (SnakeBeta, SnakePhase)):
+                alphas.append(m.alpha.flatten())
+        
+        if not alphas:
+            return torch.tensor(0.0, device=next(model.parameters()).device)
+        
+        all_alphas = torch.cat(alphas)
+        log_alphas = torch.log(all_alphas.abs() + 1e-9)
+        
+        # 1. Encourage high log-variance (spread)
+        std_loss = F.relu(self.target_log_std - log_alphas.std())
+        
+        # 2. Center the distribution around target mean
+        mean_loss = (log_alphas.mean() - self.target_log_mean) ** 2
+        
+        # 3. Anti-clustering: penalize if too many values are close together
+        # Using histogram-based entropy approximation
+        if len(all_alphas) > 10:
+            # Soft histogram via Gaussian KDE approximation
+            diffs = all_alphas.unsqueeze(0) - all_alphas.unsqueeze(1)
+            sigma = all_alphas.std() / 3 + 1e-6
+            kde = torch.exp(-0.5 * (diffs / sigma) ** 2).mean(dim=1)
+            entropy = -torch.mean(torch.log(kde + 1e-9))
+            entropy_loss = F.relu(2.0 - entropy)  # Encourage entropy > 2
+        else:
+            entropy_loss = torch.tensor(0.0, device=all_alphas.device)
+        
+        total = std_loss + 0.5 * mean_loss + self.entropy_weight * entropy_loss
+        return total
