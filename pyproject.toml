@@ -29,3 +29,4 @@ packages = ["ultra_low_bitrate_codec"]
 train = "ultra_low_bitrate_codec.train:main"
 download-data = "ultra_low_bitrate_codec.download_data:main"
 preprocess = "ultra_low_bitrate_codec.preprocess_data:main"
+train-bitnet = "ultra_low_bitrate_codec.train_bitnet_entry:main"
