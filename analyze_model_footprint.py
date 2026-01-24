@@ -59,7 +59,17 @@ def analyze_footprint(config_path, checkpoint_dir):
     print("Loading checkpoints...") 
     try:
         factorizer.load_state_dict(torch.load(f"{checkpoint_dir}/factorizer.pt", map_location=device), strict=False)
-        decoder.load_state_dict(torch.load(f"{checkpoint_dir}/decoder.pt", map_location=device), strict=False)
+        # Custom loading for decoder to handle Phase Head shape mismatch
+        d_ckpt = torch.load(f"{checkpoint_dir}/decoder.pt", map_location=device)
+        d_state = d_ckpt['model_state_dict'] if 'model_state_dict' in d_ckpt else d_ckpt
+        decoder_state = decoder.state_dict()
+        new_d = {}
+        for k, v in d_state.items():
+            k_clean = k.replace("_orig_mod.", "")
+            if k_clean in decoder_state:
+                if v.shape == decoder_state[k_clean].shape:
+                    new_d[k_clean] = v
+        decoder.load_state_dict(new_d, strict=False)
         entropy_model.load_state_dict(torch.load(f"{checkpoint_dir}/entropy.pt", map_location=device), strict=False)
         sem_vq.load_state_dict(torch.load(f"{checkpoint_dir}/sem_rfsq.pt", map_location=device), strict=False)
         pro_vq.load_state_dict(torch.load(f"{checkpoint_dir}/pro_rfsq.pt", map_location=device), strict=False)
@@ -160,6 +170,55 @@ def analyze_footprint(config_path, checkpoint_dir):
     print(f"\n3. Speaker Header (One-time):")
     print(f"   Size: {spk_bits} bits ({spk_bits/8:.0f} bytes)")
     
+    print("=" * 60)
+
+    # 4. Flow Matching (Phase 7) Footprint
+    print("\n🌊 Flow Matching Model Analysis:")
+    from ultra_low_bitrate_codec.models.flow_matching import FlowMatchingHead
+    flow_head = FlowMatchingHead(
+        in_channels=1026, 
+        cond_channels=512, 
+        hidden_dim=256, 
+        depth=6, 
+        heads=8
+    ).to(device)
+    
+    # Check if checkpoint exists
+    flow_ckpt = f"checkpoints_flow_matching/flow_epoch20.pt" 
+    if os.path.exists(flow_ckpt):
+        try:
+            flow_head.load_state_dict(torch.load(flow_ckpt, map_location=device))
+            print(f"Loaded Flow Head from {flow_ckpt}")
+        except:
+            print("Checkpoint mismatch, using random init for sizing")
+    else:
+        print("Using random init Flow Head for size estimation")
+        
+    flow_mb = get_model_size_mb(flow_head)
+    flow_params = sum(p.numel() for p in flow_head.parameters())
+    
+    print(f"{'Flow Head FP32':<25} | {flow_mb:>10.2f} | {flow_params:>12,}")
+    
+    # 1.58-bit Estimate
+    bit_params = 0
+    std_params = 0
+    from ultra_low_bitrate_codec.models.bitlinear import BitLinear, BitConv1d
+    
+    for m in flow_head.modules():
+        if isinstance(m, (BitLinear, BitConv1d)):
+            bit_params += m.weight.numel()
+        elif isinstance(m, (torch.nn.Linear, torch.nn.Conv1d, torch.nn.LayerNorm, torch.nn.Embedding)):
+            if hasattr(m, 'weight'): std_params += m.weight.numel()
+            if hasattr(m, 'bias') and m.bias is not None: std_params += m.bias.numel()
+            
+    size_bits = (bit_params * 1.58) + (std_params * 16)
+    size_mb_compressed = size_bits / 8 / 1024 / 1024
+    
+    print("-" * 60)
+    print(f"Total Params: {flow_params:,}")
+    print(f" - BitNet Params: {bit_params:,}")
+    print(f" - Standard Params: {std_params:,}")
+    print(f"Theoretical Size (1.58-bit + FP16): {size_mb_compressed:.2f} MB")
     print("=" * 60)
 
 if __name__ == "__main__":

@@ -69,12 +69,18 @@ class InstantaneousFrequencyHead(nn.Module):
     """
     Predict phase using instantaneous frequency (more stable than raw phase).
     IF = d(phase)/dt, which is smoother and easier to learn.
+    
+    IMPROVED: Uses per-frequency integration weights instead of a single scalar.
     """
     def __init__(self, input_dim, output_dim):
         super().__init__()
         from .bitlinear import BitLinear
         self.proj = BitLinear(input_dim, output_dim)
-        self.cumsum_weight = nn.Parameter(torch.ones(1) * 0.1)  # Learnable integration rate
+        
+        # Per-frequency cumsum weights (Initialize: linear slope 0.05 -> 0.4)
+        # This allows different frequencies to oscillate at different rates
+        init_slopes = torch.linspace(0.05, 0.4, output_dim)
+        self.cumsum_weight = nn.Parameter(init_slopes.unsqueeze(0)) # (1, F)
         
     def forward(self, x):
         # x: (B, T, C)
@@ -84,6 +90,7 @@ class InstantaneousFrequencyHead(nn.Module):
         
         # Integrate IF to get phase (cumulative sum along time)
         # phase[t] = sum(IF[0:t])
+        # Broadcasting: (B, T, F) * (1, F)
         phase = torch.cumsum(inst_freq * self.cumsum_weight, dim=1)
         
         # Wrap phase to [-pi, pi]
@@ -143,10 +150,16 @@ class VocosGeneratorV2(nn.Module):
         # Learnable window
         self.register_buffer('window', torch.hann_window(n_fft))
         
-    def forward(self, x):
+    def predict_components(self, x):
         """
-        x: (B, T, C) or (B, C, T)
-        Returns: audio (B, T_audio)
+        Predict magnitude and phase from input features.
+        
+        Args:
+            x: (B, T, C) or (B, C, T)
+        Returns:
+            mag: (B, T, F) Linear magnitude
+            phase: (B, T, F) Wrapped phase
+            log_mag: (B, T, F) Log magnitude
         """
         # Handle input format
         if x.dim() == 2:
@@ -184,6 +197,18 @@ class VocosGeneratorV2(nn.Module):
         # Phase (via instantaneous frequency)
         phase = self.phase_head(x)
         
+        return mag, phase, log_mag
+
+    def synthesize(self, mag, phase):
+        """
+        Synthesize audio from magnitude and phase using iSTFT.
+        
+        Args:
+            mag: (B, T, F) Linear magnitude
+            phase: (B, T, F) Wrapped phase
+        Returns:
+            audio: (B, T_audio)
+        """
         # Construct complex spectrum (force float32 for stability)
         mag = mag.float()
         phase = phase.float()
@@ -202,8 +227,15 @@ class VocosGeneratorV2(nn.Module):
             window=self.window,
             center=True
         )
-        
         return audio
+
+    def forward(self, x):
+        """
+        x: (B, T, C) or (B, C, T)
+        Returns: audio (B, T_audio)
+        """
+        mag, phase, _ = self.predict_components(x)
+        return self.synthesize(mag, phase)
 
 
 class NeuralVocoderV2(nn.Module):

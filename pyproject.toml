@@ -7,7 +7,7 @@ dependencies = [
     "torch>=2.0.0",
     "torchaudio>=2.0.0",
     "transformers>=4.30.0",
-    "numpy>=1.24.0",
+    "numpy<2.0",
     "scipy>=1.10.0",
     "pyyaml>=6.0",
     "tqdm>=4.65.0",
@@ -16,6 +16,11 @@ dependencies = [
     "protobuf>=4.0.0",
     "matplotlib>=3.7.0",
     "datasets>=4.5.0",
+    "speechmos",
+    "librosa",
+    "onnxruntime",
+    "torchcodec",
+    "tensorboard",
 ]
 
 [build-system]

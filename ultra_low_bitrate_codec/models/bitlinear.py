@@ -12,8 +12,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+try:
+    from ultra_low_bitrate_codec.kernels.bitnet_triton_packed import triton_bit_linear
+    HAS_TRITON = True
+except ImportError:
+    HAS_TRITON = False
+    print("Warning: Triton kernel not found, using PyTorch fallback.")
 
 class RMSNorm(nn.Module):
+    # ... (Keep existing RMSNorm) ...
     """
     Root Mean Square Layer Normalization.
     Used in BitNet instead of LayerNorm (no mean subtraction).
@@ -28,117 +35,73 @@ class RMSNorm(nn.Module):
         rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
         return x / rms * self.weight
 
-
 def ste_sign(x):
-    """
-    Sign function with Straight-Through Estimator.
-    Forward: sign(x) → {-1, +1}
-    Backward: gradient passes through unchanged
-    """
     return (x.sign() - x).detach() + x
 
-
 def weight_quant_ternary(w):
-    """
-    Quantize weights to ternary {-1, 0, +1}.
-    
-    Method from BitNet 1.58b:
-    1. Compute scale = mean(|w|)
-    2. Quantize to {-1, 0, +1} based on threshold
-    """
     scale = w.abs().mean().clamp(min=1e-5)
-    
-    # Normalize by scale
     w_normalized = w / scale
-    
-    # Ternary quantization with STE
-    # Values close to 0 stay 0, others become ±1
     w_quantized = torch.round(w_normalized.clamp(-1, 1))
-    
-    # STE: forward uses quantized, backward uses original
     return (w_quantized - w_normalized).detach() + w_normalized, scale
 
-
 def activation_quant_8bit(x, num_bits=8):
-    """
-    Quantize activations to 8-bit integer range.
-    Scales to [-127, 127] for int8 compatibility.
-    """
     Qn = -(2 ** (num_bits - 1))
     Qp = 2 ** (num_bits - 1) - 1
-    
-    # Per-tensor scaling
     scale = x.abs().max().clamp(min=1e-5)
     x_scaled = x / scale * Qp
-    
-    # Round with STE
     x_quant = torch.round(x_scaled.clamp(Qn, Qp))
     x_quant = (x_quant - x_scaled).detach() + x_scaled
-    
     return x_quant / Qp * scale
 
-
 class BitLinear(nn.Module):
-    """
-    Linear layer with ternary weights {-1, 0, +1}.
-    
-    During training:
-        - Weights are FP32 but quantized in forward pass
-        - STE allows gradients to flow through quantization
-    
-    During inference:
-        - Weights can be stored as int2 (2 bits per weight)
-        - MatMul becomes addition/subtraction only
-    """
     def __init__(self, in_features: int, out_features: int, bias: bool = False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         
-        # Full precision weights for training
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
-        
-        # BitNet typically doesn't use bias
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features))
         else:
             self.register_parameter('bias', None)
         
-        # RMSNorm before quantization (as per BitNet)
         self.norm = RMSNorm(in_features)
-        
-        # Initialize
         self._init_weights()
     
     def _init_weights(self):
-        # Kaiming initialization scaled for ternary
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
     
     def forward(self, x):
-        """
-        Forward pass with quantization.
-        
-        Args:
-            x: Input tensor (B, *, in_features)
-        Returns:
-            Output tensor (B, *, out_features)
-        """
         # Normalize input
         x = self.norm(x)
         
-        # Quantize activations to 8-bit
-        x_quant = activation_quant_8bit(x)
-        
-        # Quantize weights to ternary
-        w_quant, w_scale = weight_quant_ternary(self.weight)
-        
-        # Linear operation (simulates int8 × int2 → int accumulator)
-        out = F.linear(x_quant, w_quant, self.bias)
-        
-        # Scale output
-        out = out * w_scale
-        
-        return out
+        if HAS_TRITON and x.is_cuda and self.weight.is_cuda:
+            # Use Fused Triton Kernel
+            # We need to quantize weights to get the scale and the ternary values
+            # The kernel wrapper handles packing and execution
+            
+            # Note: weight_quant_ternary returns (w_hard + grad_trick), scale
+            # We need the 'hard' ternary values for packing.
+            # But during training, we also need gradients to flow back to self.weight.
+            # Our Autograd Function takes `weight` (ternary) as input.
+            
+            # So we must perform the weight quantization logic here to get the 'ternary' input for the kernel.
+            # (Which seems redundant if we pack it immediately, but necessary for STE graph connectivity)
+            
+            w_quant, w_scale = weight_quant_ternary(self.weight)
+            
+            # Fused Matmul: Quantizes X (Int8) and uses Packed W (Int2)
+            out = triton_bit_linear(x, w_quant, w_scale)
+            
+            if self.bias is not None:
+                out += self.bias
+            return out
+        else:
+            # Fallback
+            x_quant = activation_quant_8bit(x)
+            w_quant, w_scale = weight_quant_ternary(self.weight)
+            out = F.linear(x_quant, w_quant, self.bias)
+            return out * w_scale
 
 
 class BitConv1d(nn.Module):

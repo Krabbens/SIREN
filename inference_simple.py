@@ -259,9 +259,23 @@ def main():
     if audio_hat.dim() == 2:
         audio_hat = audio_hat.squeeze(0)
     
+
+    # Calculate Mel Loss for filename
+    mel_transform = torchaudio.transforms.MelSpectrogram(sample_rate=16000, n_mels=80).to(device)
+    orig_mel = mel_transform(audio.to(device))
+    rec_mel = mel_transform(audio_hat.to(device))
+    
+    # Fix length mismatch
+    min_len = min(orig_mel.shape[-1], rec_mel.shape[-1])
+    orig_mel = orig_mel[..., :min_len]
+    rec_mel = rec_mel[..., :min_len]
+    
+    mel_loss = torch.nn.functional.l1_loss(orig_mel, rec_mel).item()
+    print(f"Mel Loss: {mel_loss:.4f}")
+    
     basename = os.path.splitext(os.path.basename(args.input))[0]
-    out_wav = os.path.join(args.output_dir, f"{basename}_step{args.step}.wav")
-    out_spec = os.path.join(args.output_dir, f"{basename}_step{args.step}_spec.png")
+    out_wav = os.path.join(args.output_dir, f"{basename}_step{args.step}_loss{mel_loss:.3f}.wav")
+    out_spec = os.path.join(args.output_dir, f"{basename}_step{args.step}_loss{mel_loss:.3f}_spec.png")
     
     sf.write(out_wav, audio_hat.cpu().numpy(), 16000)
     plot_spectrogram(audio.squeeze(), audio_hat.cpu(), basename, out_spec)

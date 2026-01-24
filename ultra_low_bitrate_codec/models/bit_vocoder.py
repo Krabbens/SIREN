@@ -256,12 +256,16 @@ class BitVocoder(nn.Module):
         # Window for iSTFT
         self.register_buffer('window', torch.hann_window(n_fft))
     
-    def forward(self, x):
+    def predict_components(self, x):
         """
+        Predict magnitude and phase from input features.
+        
         Args:
             x: (B, T, C) or (B, C, T)
         Returns:
-            audio: (B, T_audio)
+            mag: (B, T, F) Linear magnitude
+            phase: (B, T, F) Wrapped phase
+            log_mag: (B, T, F) Log magnitude
         """
         # Handle input format
         if x.dim() == 2:
@@ -303,6 +307,18 @@ class BitVocoder(nn.Module):
         # Phase
         phase = self.phase_head(x)
         
+        return mag, phase, log_mag
+
+    def synthesize(self, mag, phase):
+        """
+        Synthesize audio from magnitude and phase.
+        
+        Args:
+            mag: (B, T, F)
+            phase: (B, T, F)
+        Returns:
+            audio: (B, T_audio)
+        """
         # Construct complex spectrum
         mag = mag.float()
         phase = phase.float()
@@ -321,8 +337,17 @@ class BitVocoder(nn.Module):
             window=self.window,
             center=True
         )
-        
         return audio
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, T, C) or (B, C, T)
+        Returns:
+            audio: (B, T_audio)
+        """
+        mag, phase, _ = self.predict_components(x)
+        return self.synthesize(mag, phase)
     
     def count_parameters(self):
         """Count total and quantizable parameters."""
