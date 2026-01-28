@@ -17,7 +17,7 @@ env/
 
 # Data and checkpoints (too large for git)
 data/
-checkpoints/
+# checkpoints/
 outputs/
 logs/
 *.pt
