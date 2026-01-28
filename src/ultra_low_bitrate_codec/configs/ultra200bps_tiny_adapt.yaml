@@ -1,0 +1,110 @@
+# Config for TinyHubert Factorizer Adaptation
+# Based on ultra200bps_large.yaml but modified for TinyHubert adaptation
+
+model:
+  # Feature Extractor - USING TINYHUBERT (768d)
+  # But we feed precomputed features, so this is just for reference/inference instantiation
+  hubert_model: "tiny_hubert" 
+  hubert_layer: -1 # Not used for precomputed
+  freeze_hubert: true
+  
+  # =========================================
+  # QUANTIZER - KEEP SAME as checkpoint
+  # =========================================
+  quantizer_type: "rfsq"
+  fsq_levels: [5, 5, 5, 5, 5, 5, 5, 5]
+  rfsq_num_levels: 3
+  
+  # =========================================
+  # SEMANTIC - 195 bps settings
+  # =========================================
+  semantic:
+    input_dim: 768  # TinyHubert is 768d
+    hidden_dim: 256
+    output_dim: 8
+    temporal_compression: 2
+    vocab_size: 256
+    
+  # =========================================
+  # PROSODY - High Rate settings from checkpoint
+  # =========================================
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 8
+    temporal_compression: 8
+    vocab_size: 256
+    
+  # Speaker
+  speaker:
+    embedding_dim: 256
+    num_groups: 8
+    codes_per_group: 256
+    
+  # Entropy Coding
+  entropy:
+    enabled: true
+    lm_layers: 2
+    lm_dim: 128
+    lm_heads: 4
+    context_length: 64
+    vocab_size: 256
+    
+  # Decoder - KEEP SAME
+  decoder:
+    fusion_dim: 512
+    fusion_heads: 8
+    fusion_layers: 6
+    dropout: 0.1
+        
+  # Vocoder - KEEP SAME
+  vocoder:
+    type: "bitvocoder"
+    dim: 512
+    num_convnext_layers: 12
+    num_res_blocks: 4
+    
+  bit_vocoder:
+    dim: 512
+    num_layers: 12
+    num_res_blocks: 4
+
+training:
+  batch_size: 16
+  learning_rate: 2e-5  # Low LR for fine-tuning
+  warmup_steps: 1000
+  max_steps: 120000    # Resume from 87000 -> +33k steps
+  num_workers: 0
+  persistent_workers: false
+  
+  use_gan: false
+  
+  # Loss weights
+  stft_weight: 15.0
+  bandwise_mel_weight: 10.0
+  waveform_weight: 2.0
+  spectral_flux_weight: 2.0
+  
+  diversity_weight: 0.1
+  entropy_weight: 0.01
+  
+  sharpener_enabled: true
+  
+  log_every: 100
+  eval_every: 1000     # Frequent eval
+  save_every: 2000
+  
+data:
+  train_manifest: "data/mixed_train.json"
+  val_manifest: "data/mixed_val.json"
+  feature_dir: "data/features_tiny_train" # Points to NEW TinyHubert features
+  sample_rate: 16000
+  max_duration: 15.0
+  min_duration: 1.0
+  
+  multi_speaker: true
+  num_speakers: -1
+
+audio:
+  sample_rate: 16000
+  hop_length: 320

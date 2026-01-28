@@ -11,7 +11,7 @@ import random
 import matplotlib.pyplot as plt
 import torchaudio
 from ultra_low_bitrate_codec.models.flow_matching import ConditionalFlowMatching
-from ultra_low_bitrate_codec.models.fuser import ConditionFuser
+from ultra_low_bitrate_codec.models.fuser import ConditionFuser, ConditionFuserV2
 
 def save_spectrogram(data, path):
     # data: (80, T) or (1, 80, T)
@@ -144,9 +144,11 @@ def main():
     # Models
     model = ConditionalFlowMatching(config).to(device)
     
-    # Fuser: 8 (sem) + 8 (pro) + 256 (spk) -> 512
-    # These dims match ultra200bps_large.yaml and check_dims.py
-    fuser = ConditionFuser(sem_dim=8, pro_dim=8, spk_dim=256, out_dim=512).to(device)
+    # Fuser V2: Learned upsampling + Cross-attention + PosEnc
+    # sem_upsample=4 means semantic is 4x lower resolution than Mel
+    # pro_upsample=8 means prosody is 8x lower resolution than Mel
+    fuser = ConditionFuserV2(sem_dim=8, pro_dim=8, spk_dim=256, out_dim=512, 
+                              sem_upsample=4, pro_upsample=8).to(device)
     
     # Discriminator
     discriminator = MelDiscriminator().to(device)
