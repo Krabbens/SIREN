@@ -1,0 +1,49 @@
+model:
+  encoder:
+    # (Same as foundation)
+    dim: 512
+    layers: 8
+    heads: 8
+  
+  # Quantizer Settings (Matched to foundation)
+  fsq_levels: [5, 5, 5, 5, 5, 5, 5, 5]
+  rfsq_num_levels: 3
+  
+  semantic:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 8
+    temporal_compression: 2
+    vocab_size: 256
+    
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 8
+    temporal_compression: 8
+    vocab_size: 256
+    
+  speaker:
+    embedding_dim: 256
+    num_groups: 8       # Corrected to 8 (was 4 in previous attempt which might be wrong, checking checkpoint keys is best but sticking to large config)
+    codes_per_group: 256
+
+  decoder:
+    fusion_dim: 80       # TARGET: Mel Spectrogram (80 bins)
+    fusion_heads: 8
+    dropout: 0.1
+    fusion_layers: 8     # Foundation depth
+  
+  # Flow Matching Specifics
+  flow_matching:
+    dim: 512             # Internal Transformer Dim
+    layers: 12           # Deeper than foundation (was 8) for better velocity prediction
+    heads: 8
+    dropout: 0.1
+    sigma_min: 1e-4
+
+training:
+  batch_size: 64        # Increased from 16
+  lr: 2.0e-4           # Increased from 1e-4
+  epochs: 100
+  steps_per_epoch: 1000

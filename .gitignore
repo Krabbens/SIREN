@@ -17,10 +17,12 @@ env/
 
 # Data and checkpoints (too large for git)
 data/
-checkpoints*/
-*.pt
-*.pth
-*.ckpt
+# checkpoints/
+outputs/
+logs/
+# *.pt
+# *.pth
+# *.ckpt
 
 # Logs and generated files
 *.log
@@ -45,6 +47,10 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+trash/
+*.tar.gz
+distillation.pid
+get-pip.py
 
 # Test outputs
 test_audio/
