@@ -42,11 +42,55 @@ class AdaLN(nn.Module):
         # Apply modulation: (1 + scale) * x + shift
         return x * (1 + scale) + shift
 
+class ManualFlashAttention(nn.Module):
+    """
+    Binary-compatible FlashAttention using F.scaled_dot_product_attention.
+    Matches nn.MultiheadAttention state_dict keys for easy loading.
+    """
+    def __init__(self, dim, num_heads, dropout=0.0):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.dropout = dropout
+        
+        # EXACT names to match nn.MultiheadAttention state_dict
+        self.in_proj_weight = nn.Parameter(torch.empty(3 * dim, dim))
+        self.in_proj_bias = nn.Parameter(torch.empty(3 * dim))
+        self.out_proj = nn.Linear(dim, dim)
+        
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        nn.init.constant_(self.in_proj_bias, 0.)
+        nn.init.xavier_uniform_(self.out_proj.weight)
+        nn.init.constant_(self.out_proj.bias, 0.)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        # Project and split to Q, K, V
+        qkv = F.linear(x, self.in_proj_weight, self.in_proj_bias) # (B, T, 3*C)
+        qkv = qkv.view(B, T, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # SDPA (FlashAttention kernel)
+        out = F.scaled_dot_product_attention(
+            q, k, v, 
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False
+        )
+        
+        # Combine heads
+        out = out.transpose(1, 2).reshape(B, T, C)
+        out = self.out_proj(out)
+        return out
+
 class BitTransformerBlock(nn.Module):
     def __init__(self, dim, num_heads, hidden_dim, cond_dim, dropout=0.0):
         super().__init__()
         self.norm1 = AdaLN(dim, cond_dim)
-        self.attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+        # self.attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+        self.attn = ManualFlashAttention(dim, num_heads, dropout)
         self.norm2 = AdaLN(dim, cond_dim)
         self.ffn = BitFeedForward(dim, hidden_dim, dropout)
         
@@ -55,7 +99,8 @@ class BitTransformerBlock(nn.Module):
         
         # Attention with AdaLN
         xn = self.norm1(x, c)
-        attn_out, _ = self.attn(xn, xn, xn)
+        # attn_out, _ = self.attn(xn, xn, xn)
+        attn_out = self.attn(xn)
         x = x + attn_out
         
         # FFN with AdaLN
@@ -157,7 +202,39 @@ class ConditionalFlowMatching(nn.Module):
         
         return v_pred
 
-    @torch.no_grad()
+    def compute_loss(self, x_1, cond):
+        """
+        Compute Flow Matching Loss.
+        Args:
+            x_1: (B, T, out_dim) Target data (Mel spectrogram)
+            cond: (B, T, hidden_dim) Conditioning
+        Returns:
+            loss: Scalar loss
+        """
+        B, T, _ = x_1.shape
+        device = x_1.device
+        
+        # Sample x_0 (noise)
+        x_0 = torch.randn_like(x_1)
+        
+        # Sample t
+        t = torch.rand(B, device=device)
+        
+        # Linear interpolation (OT path)
+        # x_t = (1 - t) * x_0 + t * x_1
+        # reshape t for broadcasting: (B, 1, 1)
+        t_b = t.view(B, 1, 1)
+        x_t = (1 - t_b) * x_0 + t_b * x_1
+        
+        # Target velocity u_t = x_1 - x_0
+        u_t = x_1 - x_0
+        
+        # Predict velocity
+        v_pred = self(x_t, t, cond)
+        
+        # Loss
+        return F.mse_loss(v_pred, u_t)
+
     def solve_ode(self, cond, steps=10, solver='euler', cfg_scale=1.0):
         # Reuse existing solve_ode logic but ensure shapes are consistent
         B, T, _ = cond.shape
@@ -186,6 +263,32 @@ class ConditionalFlowMatching(nn.Module):
                 t_mid = t_batch + (dt / 2)
                 v_mid = get_velocity(x_mid, t_mid, cond)
                 x = x + v_mid * dt
+            elif solver == 'rk4':
+                # Runge-Kutta 4
+                k1 = get_velocity(x, t_batch, cond)
+                
+                t_half = t_batch + dt / 2
+                x_k1 = x + k1 * (dt / 2)
+                k2 = get_velocity(x_k1, t_half, cond)
+                
+                x_k2 = x + k2 * (dt / 2)
+                k3 = get_velocity(x_k2, t_half, cond)
+                
+                t_next = t_batch + dt
+                x_k3 = x + k3 * dt
+                k4 = get_velocity(x_k3, t_next, cond)
+                
+                x = x + (dt / 6) * (k1 + 2*k2 + 2*k3 + k4)
+            elif solver == 'heun':
+                # Heun's Method (Predictor-Corrector)
+                # Predict (Euler)
+                v1 = get_velocity(x, t_batch, cond)
+                x_pred = x + v1 * dt
+                
+                # Correct
+                t_next = t_batch + dt
+                v2 = get_velocity(x_pred, t_next, cond)
+                x = x + (v1 + v2) * (dt / 2)
             else: # Euler
                 v_pred = get_velocity(x, t_batch, cond)
                 x = x + v_pred * dt

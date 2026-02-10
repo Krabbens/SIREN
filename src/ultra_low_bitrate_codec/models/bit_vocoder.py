@@ -129,7 +129,10 @@ class BitInstantaneousFrequencyHead(nn.Module):
         self.num_heads = num_heads
         
         # Multi-head projection for richer phase representation
-        self.proj = BitLinear(input_dim, output_dim * num_heads)
+        self.proj = nn.Sequential(
+            RMSNorm(input_dim),
+            nn.Linear(input_dim, output_dim * num_heads) # FP32 for precise frequency
+        )
         
         # Per-frequency cumsum weights (key fix for banding)
         # Initialize with different values for low/mid/high frequencies
@@ -247,7 +250,8 @@ class BitVocoder(nn.Module):
         self.mag_head = nn.Sequential(
             BitLinear(dim, dim),
             SnakeBeta(dim),
-            BitLinear(dim, self.out_dim)
+            RMSNorm(dim), # Norm before Linear
+            nn.Linear(dim, self.out_dim) # FP32 for precise magnitude
         )
         
         # Phase head (IF-based)
@@ -297,11 +301,9 @@ class BitVocoder(nn.Module):
         x = self.norm(x)
         
         # Magnitude (log-scale)
-        log_mag = self.mag_head[0](x)
-        log_mag = log_mag.transpose(1, 2)
-        log_mag = self.mag_head[1](log_mag)
-        log_mag = log_mag.transpose(1, 2)
-        log_mag = self.mag_head[2](log_mag)
+        # Magnitude (log-scale)
+        # mag_head layers (BitLinear, SnakeBeta, RMSNorm, Linear) all support (B, T, C)
+        log_mag = self.mag_head(x)
         mag = torch.exp(torch.clamp(log_mag, min=-10, max=10))
         
         # Phase
@@ -402,6 +404,8 @@ class NeuralVocoderBit(nn.Module):
             num_layers=bit_config.get('num_layers', 4),
             num_res_blocks=bit_config.get('num_res_blocks', 1)
         )
+        print(f"DEBUG: NeuralVocoderBit initialized with input_dim={self.input_dim}, dim={bit_config.get('dim', 256)}")
+        print(f"DEBUG: BitConfig was: {bit_config}")
     
     def forward(self, x):
         if x.dim() == 2:

@@ -292,3 +292,48 @@ class SnakeBetaDiversityLoss(nn.Module):
         
         total = std_loss + 0.5 * mean_loss + self.entropy_weight * entropy_loss
         return total
+
+
+# =============================================================================
+# GAN LOSSES
+# =============================================================================
+
+class HingeGANLoss(nn.Module):
+    """
+    Hinge Adversarial Loss for GANs.
+    Robust and stable loss function for training discriminators and generators.
+    """
+    def __init__(self):
+        super().__init__()
+
+    def discriminator_loss(self, df_real, df_fake):
+        # Expect list of outputs from multi-scale/period discriminators
+        loss = 0
+        for dr, dg in zip(df_real, df_fake):
+            # Dr should be > 1, Dg should be < -1
+            r_loss = torch.mean(F.relu(1 - dr))
+            g_loss = torch.mean(F.relu(1 + dg))
+            loss += (r_loss + g_loss)
+        return loss
+
+    def generator_loss(self, df_fake):
+        loss = 0
+        for dg in df_fake:
+            loss += -torch.mean(dg)
+        return loss
+        
+class FeatureMatchingLoss(nn.Module):
+    """
+    Feature Matching Loss for GANs.
+    Minimizes L1 distance between discriminator feature maps of real and fake samples.
+    Stabilizes training by forcing the generator to match intermediate statistics.
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, fmap_real, fmap_fake):
+        loss = 0
+        for fr, fg in zip(fmap_real, fmap_fake):
+            for feat_r, feat_g in zip(fr, fg):
+                loss += torch.mean(torch.abs(feat_r - feat_g))
+        return loss

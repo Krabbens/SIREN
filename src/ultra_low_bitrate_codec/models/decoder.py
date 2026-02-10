@@ -11,29 +11,63 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
+from .bitlinear import BitLinear, RMSNorm, BitSnakeBeta
+
+class BitTransformerEncoderLayer(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
         super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        
+        # BitNet style FF with BitSnakeBeta
+        self.ff = nn.Sequential(
+            BitLinear(d_model, dim_feedforward),
+            BitSnakeBeta(dim_feedforward),
+            nn.Dropout(dropout),
+            BitLinear(dim_feedforward, d_model),
+            nn.Dropout(dropout)
+        )
+        
+        self.norm1 = RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
 
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        # Pre-norm architecture
+        src2 = self.norm1(src)
+        src2 = self.self_attn(src2, src2, src2, attn_mask=src_mask,
+                              key_padding_mask=src_key_padding_mask)[0]
+        src = src + src2
+        
+        src2 = self.norm2(src)
+        src = src + self.ff(src2)
+        return src
 
-    def forward(self, x):
-        """
-        Args:
-            x: Tensor, shape [seq_len, batch_size, embedding_dim] or [batch_size, seq_len, embedding_dim]
-        """
-        # Adapt to batch_first=True used in Transformer
-        if x.size(1) == self.pe.shape[2]: # x is [B, T, D]
-             x = x + self.pe[:x.size(1), 0, :].unsqueeze(0)
-        else: # x is [T, B, D]
-             x = x + self.pe[:x.size(0)]
-        return self.dropout(x)
+class BitTransformerEncoder(nn.Module):
+    def __init__(self, layer, num_layers):
+        super().__init__()
+        # Extract params from the prototype layer (likely a standard TransformerEncoderLayer if passed from config)
+        if hasattr(layer, 'self_attn'):
+             d_model = layer.self_attn.embed_dim
+             nhead = layer.self_attn.num_heads
+             dim_feedforward = layer.linear1.out_features if hasattr(layer, 'linear1') else d_model * 4
+             dropout = layer.dropout.p if hasattr(layer, 'dropout') else 0.1
+        else:
+             # Fallback if it's already a config or something else
+             d_model = 512
+             nhead = 8
+             dim_feedforward = 2048
+             dropout = 0.1
+
+        self.layers = nn.ModuleList([
+            BitTransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
+            for _ in range(num_layers)
+        ])
+        self.d_model = d_model
+
+    def forward(self, src, mask=None, src_key_padding_mask=None):
+        output = src
+        for mod in self.layers:
+            output = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask)
+        return output
 
 
 
@@ -46,7 +80,7 @@ class LearnableUpsampler(nn.Module):
         super().__init__()
         self.factor = factor
         
-        from .bitlinear import BitConvTranspose1d, BitConv1d
+        from .bitlinear import BitConvTranspose1d, BitConv1d, RMSNorm
         
         # Main upsampling path (BitNet)
         self.upsample = BitConvTranspose1d(
@@ -59,11 +93,11 @@ class LearnableUpsampler(nn.Module):
         # Refinement convolution (BitNet)
         self.refine = nn.Sequential(
             BitConv1d(output_dim, output_dim, kernel_size=7, padding=3),
-            nn.SiLU(),
+            BitSnakeBeta(output_dim),
             BitConv1d(output_dim, output_dim, kernel_size=7, padding=3)
         )
         
-        self.norm = nn.LayerNorm(output_dim)
+        self.norm = RMSNorm(output_dim)
         
     def forward(self, x):
         # x: (B, T, C) -> (B, C, T)
@@ -80,24 +114,24 @@ class CrossAttentionFusion(nn.Module):
     Cross-attention based fusion for semantic and prosody.
     Allows prosody to modulate semantic content.
     """
-    def __init__(self, dim, num_heads=8, dropout=0.1):
+    def __init__(self, sem_dim, pro_dim, num_heads=8, dropout=0.1):
         super().__init__()
-        self.norm_sem = nn.LayerNorm(dim)
-        self.norm_pro = nn.LayerNorm(dim)
-        
-        from .bitlinear import BitLinear
+        print(f"DEBUG CROSS_FUSION INIT: sem={sem_dim}, pro={pro_dim}")
+        self.norm_sem = RMSNorm(sem_dim)
+        self.norm_pro = RMSNorm(pro_dim)
         
         # Semantic attends to prosody
         self.cross_attn = nn.MultiheadAttention(
-            dim, num_heads, dropout=dropout, batch_first=True
+            sem_dim, num_heads, dropout=dropout, batch_first=True,
+            kdim=pro_dim, vdim=pro_dim
         )
         
         self.ff = nn.Sequential(
-            nn.LayerNorm(dim),
-            BitLinear(dim, dim * 4),
-            nn.GELU(),
+            RMSNorm(sem_dim),
+            BitLinear(sem_dim, sem_dim * 4),
+            BitSnakeBeta(sem_dim * 4),
             nn.Dropout(dropout),
-            BitLinear(dim * 4, dim),
+            BitLinear(sem_dim * 4, sem_dim),
             nn.Dropout(dropout)
         )
         
@@ -139,65 +173,75 @@ class FeatureReconstructorV2(nn.Module):
         
         fusion_dim = dec_cfg['fusion_dim']
         
+        # Branch Dimensions (Hybrid)
+        print(f"DEBUG DECODER CONFIG: {dec_cfg.keys()}")
+        sem_dim = dec_cfg.get('sem_dim', fusion_dim)
+        pro_dim = dec_cfg.get('pro_dim', fusion_dim)
+        spk_dim = dec_cfg.get('spk_dim', fusion_dim)
+        print(f"DEBUG DIMS: sem={sem_dim}, pro={pro_dim}, spk={spk_dim}, fusion={fusion_dim}")
+        
         # ========================================
         # UPSAMPLERS
         # ========================================
+        # ========================================
+        # UPSAMPLERS (Target Spcific Dims)
+        # ========================================
         self.sem_upsampler = LearnableUpsampler(
-            sem_cfg['output_dim'], fusion_dim // 2,
+            sem_cfg['output_dim'], sem_dim,
             factor=sem_cfg['temporal_compression']
         )
         
         self.pro_upsampler = LearnableUpsampler(
-            pro_cfg['output_dim'], fusion_dim // 4,
+            pro_cfg['output_dim'], pro_dim,
             factor=pro_cfg['temporal_compression']
         )
         
         from .bitlinear import BitLinear
         
-        # Speaker projection (BitNet)
+        # Speaker projection -> spk_dim
         self.spk_proj = nn.Sequential(
-            BitLinear(spk_cfg['embedding_dim'], fusion_dim // 4),
-            nn.SiLU(),
-            BitLinear(fusion_dim // 4, fusion_dim // 4)
+            BitLinear(spk_cfg['embedding_dim'], spk_dim),
+            BitSnakeBeta(spk_dim),
+            BitLinear(spk_dim, spk_dim)
         )
         
         # ========================================
         # FUSION
         # ========================================
-        # Initial concat: (fusion_dim//2 + fusion_dim//4 + fusion_dim//4) = fusion_dim
-        # Initial concat: (fusion_dim//2 + fusion_dim//4 + fusion_dim//4) = fusion_dim
-        self.fusion_proj = BitLinear(fusion_dim, fusion_dim)
+        # Concat Fusion: sem + pro + spk -> fusion_dim
+        # Projection from concat to fusion base
+        concat_dim = sem_dim + pro_dim + spk_dim
+        self.fusion_proj = BitLinear(concat_dim, fusion_dim)
         
-        # Cross-attention between semantic and prosody
+        # Cross-attention refinement between semantic and prosody
         self.cross_fusion = CrossAttentionFusion(
-            fusion_dim, num_heads=dec_cfg['fusion_heads']
+            sem_dim, pro_dim,
+            num_heads=dec_cfg['fusion_heads']
         )
         
         # Positional Encoding
-        self.pos_encoder = PositionalEncoding(fusion_dim, dropout=dec_cfg['dropout'])
+        self.pos_encoder = nn.Parameter(torch.zeros(1, 1000, fusion_dim))
+        self.dropout = nn.Dropout(dec_cfg['dropout'])
         
-        # Main transformer
-        encoder_layer = nn.TransformerEncoderLayer(
+        # Main transformer (BitNet)
+        prototype_layer = nn.TransformerEncoderLayer(
             d_model=fusion_dim,
             nhead=dec_cfg['fusion_heads'],
             dim_feedforward=fusion_dim * 4,
             dropout=dec_cfg['dropout'],
-            activation='gelu',
-            batch_first=True,
-            norm_first=True  # Pre-norm for stability
+            batch_first=True
         )
-        self.transformer = nn.TransformerEncoder(
-            encoder_layer, 
+        self.transformer = BitTransformerEncoder(
+            prototype_layer, 
             num_layers=dec_cfg['fusion_layers']
         )
         
-        # Output projection (to vocoder input dim)
-        # Output projection (to vocoder input dim)
+        # Output projection (BitNet)
         self.output_proj = nn.Sequential(
-            nn.LayerNorm(fusion_dim),
+            RMSNorm(fusion_dim),
             BitLinear(fusion_dim, fusion_dim),
-            nn.GELU(),
-            BitLinear(fusion_dim, fusion_dim)  # Keep at fusion_dim for vocoder
+            BitSnakeBeta(fusion_dim),
+            BitLinear(fusion_dim, fusion_dim)
         )
 
     def forward(self, sem_z, pro_z, spk_z, target_len=None):
@@ -210,8 +254,8 @@ class FeatureReconstructorV2(nn.Module):
             fused: (B, T_out, fusion_dim) features for vocoder
         """
         # Upsample
-        sem_up = self.sem_upsampler(sem_z)  # (B, T, fusion_dim//2)
-        pro_up = self.pro_upsampler(pro_z)  # (B, T, fusion_dim//4)
+        sem_up = self.sem_upsampler(sem_z)  # (B, T, sem_dim)
+        pro_up = self.pro_upsampler(pro_z)  # (B, T, pro_dim)
         
         # Align lengths
         T_out = min(sem_up.shape[1], pro_up.shape[1])
@@ -221,22 +265,24 @@ class FeatureReconstructorV2(nn.Module):
         sem_up = sem_up[:, :T_out, :]
         pro_up = pro_up[:, :T_out, :]
         
-        # Expand speaker
-        spk_emb = self.spk_proj(spk_z)  # (B, fusion_dim//4)
+        # Cross-attention fusion (refinement) - sem attends to pro
+        # Note: In hybrid mode, cross_fusion handles different dims
+        sem_up = self.cross_fusion(sem_up, pro_up)
+        
+        # Expand speaker to match spk_proj output dim (not fusion dim)
+        spk_emb = self.spk_proj(spk_z)  # (B, spk_dim)
         spk_expanded = spk_emb.unsqueeze(1).expand(-1, T_out, -1)
         
-        # Concatenate: (B, T, fusion_dim)
-        cat = torch.cat([sem_up, pro_up, spk_expanded], dim=-1)
+        # Concatenation Fusion
+        # sem(256) + pro(128) + spk(128) -> 512
+        x = torch.cat([sem_up, pro_up, spk_expanded], dim=-1)
         
         # Initial fusion projection
-        x = self.fusion_proj(cat)
-        
-        # Cross-attention fusion (optional refinement)
-        # Here sem_up and pro_up are different dims, so we skip or project
-        # For simplicity, we'll use the transformer directly
+        x = self.fusion_proj(x)
         
         # Transformer refinement
-        x = self.pos_encoder(x)
+        x = x + self.pos_encoder[:, :T_out, :]
+        x = self.dropout(x)
         x = self.transformer(x)
         
         # Output

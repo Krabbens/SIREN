@@ -164,11 +164,15 @@ def main():
         # Denormalize
         MEL_MEAN, MEL_STD = -5.0, 2.0
         mel = mel * MEL_STD + MEL_MEAN
+        
+        # Apply Gain (matching MicroHuBERT tuning)
+        # Defaulting to 2.5dB as found optimal
+        ALIGN_GAIN = 2.5
+        mel = mel + ALIGN_GAIN
+            
         mel = torch.clamp(mel, min=-12.0, max=3.0)
         
         # Vocoder
-        print("  Synthesizing audio...")
-        audio = vocoder(mel)
     
     # === Save ===
     audio = audio / (audio.abs().max() + 1e-6)

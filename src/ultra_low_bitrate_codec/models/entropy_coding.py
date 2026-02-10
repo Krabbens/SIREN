@@ -68,7 +68,7 @@ class ProbabilisticLM(nn.Module):
         
         # Use custom layers
         self.layers = nn.ModuleList([
-            CustomTransformerEncoderLayer(d_model=dim, nhead=heads, dim_feedforward=dim*4)
+            CustomTransformerEncoderLayer(d_model=dim, nhead=heads, dim_feedforward=dim*4, dropout=0.5)
             for _ in range(depth)
         ])
         
@@ -126,6 +126,19 @@ class EntropyModel(nn.Module):
         Returns: (B, T*3)
         """
         # 24-bit support (16M vocab)
+        # Optimization: If indices are small (<256), just return them directly
+        if indices.max() < 256:
+            # print("DEBUG: Optimized path taken!")
+            return indices.long()
+            
+        # Optimization: 2-byte support for indices < 65536
+        if indices.max() < 65536:
+            b1 = (indices >> 8) & 0xFF
+            b2 = indices & 0xFF
+            return torch.stack([b1, b2], dim=-1).view(indices.shape[0], -1).long()
+        else:
+            print(f"DEBUG: Slow path! Max index: {indices.max()}")
+
         b1 = (indices >> 16) & 0xFF
         b2 = (indices >> 8) & 0xFF
         b3 = indices & 0xFF
