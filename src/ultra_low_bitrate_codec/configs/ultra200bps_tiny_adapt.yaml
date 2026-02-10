@@ -12,8 +12,8 @@ model:
   # QUANTIZER - KEEP SAME as checkpoint
   # =========================================
   quantizer_type: "rfsq"
-  fsq_levels: [5, 5, 5, 5, 5, 5, 5, 5]
-  rfsq_num_levels: 3
+  fsq_levels: [5, 5, 5, 5] # Reduced to 4 dims for ultra-low bitrate
+  rfsq_num_levels: 3 # Wait, if dim is 4, FSQ expects 4 levels.
   
   # =========================================
   # SEMANTIC - 195 bps settings
@@ -21,7 +21,7 @@ model:
   semantic:
     input_dim: 768  # TinyHubert is 768d
     hidden_dim: 256
-    output_dim: 8
+    output_dim: 4 # Reduced from 8 to 4 for < 300 bps target
     temporal_compression: 2
     vocab_size: 256
     
@@ -31,7 +31,7 @@ model:
   prosody:
     input_dim: 768
     hidden_dim: 128
-    output_dim: 8
+    output_dim: 4 # Reduced from 8 to 4
     temporal_compression: 8
     vocab_size: 256
     
@@ -47,12 +47,15 @@ model:
     lm_layers: 2
     lm_dim: 128
     lm_heads: 4
-    context_length: 64
+    context_length: 32 # Reduced from 4096 to prevent overfitting
     vocab_size: 256
-    
-  # Decoder - KEEP SAME
+
+  # Decoder - Matching Checkpoint (Hybrid Concat Fusion)
   decoder:
-    fusion_dim: 512
+    fusion_dim: 512 # Final Transformer D_Model (256+128+128)
+    sem_dim: 256
+    pro_dim: 128
+    spk_dim: 128
     fusion_heads: 8
     fusion_layers: 6
     dropout: 0.1
@@ -70,11 +73,11 @@ model:
     num_res_blocks: 4
 
 training:
-  batch_size: 16
-  learning_rate: 2e-5  # Low LR for fine-tuning
-  warmup_steps: 1000
-  max_steps: 120000    # Resume from 87000 -> +33k steps
-  num_workers: 0
+  batch_size: 8
+  learning_rate: 1e-4  # Standard LR for fresh training
+  warmup_steps: 2000   # Standard warmup
+  max_steps: 200000    # Resume from 120000 -> +80k steps adaptation
+  num_workers: 8
   persistent_workers: false
   
   use_gan: false
@@ -86,7 +89,7 @@ training:
   spectral_flux_weight: 2.0
   
   diversity_weight: 0.1
-  entropy_weight: 0.01
+  entropy_weight: 0.0   # Disabled to force encoder to learn diversity (Fix for BPS=0)
   
   sharpener_enabled: true
   

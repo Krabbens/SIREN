@@ -18,7 +18,7 @@ model:
   # The factorizer output dim dictates the projection.
   # If I set output_dim to 8, I must set fsq_levels to length 8.
   # I'll guess [5, 5, 5, 5, 5, 5, 5, 5] (common) or just [6, 6, 6, 6, 6, 6, 6, 6].
-  fsq_levels: [5, 5, 5, 5, 5, 5, 5, 5]  # 8 dims (Guessing 5 or 6, trying 5 first as it's common for 8-dim)
+  fsq_levels: [8, 8, 8, 8, 8, 8, 8, 8]  # 8 dims - MATCHED TO CHECKPOINT step_87000
   rfsq_num_levels: 3  # 3 residual levels (Matched to checkpoint)
   
   # =========================================
