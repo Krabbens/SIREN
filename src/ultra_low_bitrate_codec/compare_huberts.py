@@ -44,7 +44,7 @@ def main():
     with torch.no_grad():
         inputs = proc(wav.squeeze().cpu().numpy(), sampling_rate=16000, return_tensors="pt", padding=True)
         out_big = model_big(inputs.input_values.to(device), output_hidden_states=True)
-        feat_big = out_big.hidden_states[9] # Layer 9
+        feat_big = out_big.hidden_states[12] # Layer 12 (last)
     
     # 2. TinyHubert
     print("Loading TinyHubert...")
