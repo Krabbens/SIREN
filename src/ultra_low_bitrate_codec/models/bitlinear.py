@@ -13,11 +13,15 @@ import torch.nn.functional as F
 import math
 
 try:
-    from ultra_low_bitrate_codec.kernels.bitnet_triton_packed import triton_bit_linear
+    # Try absolute first, then relative
+    try:
+        from ultra_low_bitrate_codec.kernels.bitnet_triton_packed import triton_bit_linear
+    except ImportError:
+        from .kernels.bitnet_triton_packed import triton_bit_linear
     HAS_TRITON = True
 except ImportError:
     HAS_TRITON = False
-    print("Warning: Triton kernel not found, using PyTorch fallback.")
+    # No print here to avoid flooding logs
 
 class RMSNorm(nn.Module):
     # ... (Keep existing RMSNorm) ...
@@ -32,19 +36,23 @@ class RMSNorm(nn.Module):
     
     def forward(self, x):
         # x: (B, C, T) for conv or (B, T, C) for linear
-        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-        return x / rms * self.weight
+        # Optimization: Use torch.mean directly on last dim
+        rms = torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        return x * rms * self.weight
 
+@torch.jit.script
 def ste_sign(x):
     return (x.sign() - x).detach() + x
 
+@torch.jit.script
 def weight_quant_ternary(w):
     scale = w.abs().mean().clamp(min=1e-5)
     w_normalized = w / scale
     w_quantized = torch.round(w_normalized.clamp(-1, 1))
     return (w_quantized - w_normalized).detach() + w_normalized, scale
 
-def activation_quant_8bit(x, num_bits=8):
+@torch.jit.script
+def activation_quant_8bit(x, num_bits: int = 8):
     Qn = -(2 ** (num_bits - 1))
     Qp = 2 ** (num_bits - 1) - 1
     scale = x.abs().max().clamp(min=1e-5)
@@ -94,7 +102,7 @@ class BitLinear(nn.Module):
             out = triton_bit_linear(x, w_quant, w_scale)
             
             if self.bias is not None:
-                out += self.bias
+                out = out + self.bias
             return out
         else:
             # Fallback
@@ -341,3 +349,57 @@ if __name__ == "__main__":
     print(f"FP32 size: {total_params * 4 / 1024:.2f} KB")
     
     print("\n✓ All tests passed!")
+
+class BitSnakeBeta(nn.Module):
+    """
+    BitNet-optimized SnakeBeta activation.
+    Combines:
+    1. RMSNorm (for stability before activation)
+    2. SnakeBeta (periodic activation)
+    3. Activation Quantization (8-bit, for BitNet compatibility)
+    """
+    def __init__(self, channels):
+        super().__init__()
+        # RMSNorm for input stability
+        self.norm = RMSNorm(channels)
+        
+        # Log-uniform initialization for alpha (frequencies)
+        zeros = torch.zeros(1, channels, 1)
+        self.alpha = nn.Parameter(zeros.normal_(0, 1).exp().abs() + 1e-9)
+        
+        # Beta controls amplitude, initialize to 1
+        self.beta = nn.Parameter(torch.ones(1, channels, 1))
+
+    def forward(self, x):
+        # x: (B, C, T) or (B, T, C)
+        # RMSNorm expects channel last
+        orig_shape = x.shape
+        if x.dim() == 3 and x.shape[1] == self.alpha.shape[1]: 
+             # (B, C, T) case -> Permute to (B, T, C) for Norm
+             x = x.transpose(1, 2)
+             x = self.norm(x)
+             x = x.transpose(1, 2)
+        else:
+             # (B, T, C) or (B, C)
+             x = self.norm(x)
+
+        # SnakeBeta logic
+        alpha = self.alpha
+        beta = self.beta
+        
+        if x.dim() == 2:
+             # (B, C) case
+            alpha = alpha.squeeze(-1)
+            beta = beta.squeeze(-1)
+        elif x.shape[-1] == self.alpha.shape[1] and x.shape[1] != self.alpha.shape[1]:
+             # (B, T, C) case -> Permute parameters to (1, 1, C) to broadcast correctly check
+             # Current alpha is (1, C, 1). If x is (B, T, C), we need alpha as (1, 1, C)
+             alpha = alpha.permute(0, 2, 1)
+             beta = beta.permute(0, 2, 1)
+        
+        x = x + (1.0 / (beta + 1e-9)) * torch.sin(alpha * x) ** 2
+        
+        # Quantize Output (8-bit) for next BitLinear layer
+        x = activation_quant_8bit(x)
+        
+        return x

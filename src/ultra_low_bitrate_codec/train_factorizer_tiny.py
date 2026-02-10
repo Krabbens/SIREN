@@ -18,6 +18,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import argparse
 from torch.utils.tensorboard import SummaryWriter
+import numpy as np
 
 from ultra_low_bitrate_codec.models.encoder import InformationFactorizerV2
 from ultra_low_bitrate_codec.models.decoder import SpeechDecoderV2
@@ -56,6 +57,11 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     torch.backends.cudnn.benchmark = True
 
+    # DEBUG CONFIG
+    print("DEBUG CONFIG DECODER:", config['model']['decoder'])
+    print("DEBUG CONFIG VOCODER:", config['model']['vocoder'])
+    print("DEBUG CONFIG BIT_VOCODER:", config['model'].get('bit_vocoder', 'NOT FOUND'))
+
     # =========================================================================
     # RESUME STEP DETECTION
     # =========================================================================
@@ -75,6 +81,9 @@ def main():
     # =========================================================================
     print("=" * 70)
     print(f"🚀 SIREN v2 Factorizer Adaptation - Step {resume_step}")
+    print(f"DEBUG DECODER MODULE: {SpeechDecoderV2.__module__}")
+    import inspect
+    print(f"DEBUG DECODER FILE: {inspect.getfile(SpeechDecoderV2)}")
     print("=" * 70)
     
     factorizer = InformationFactorizerV2(config).to(device)
@@ -153,9 +162,12 @@ def main():
             print(f"Error loading decoder: {e}")
             
         try:
-            sem_vq.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/sem_rfsq.pt", map_location=device)), strict=False)
-            pro_vq.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/pro_rfsq.pt", map_location=device)), strict=False)
-            spk_pq.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/spk_pq.pt", map_location=device)), strict=False)
+            # We DO NOT load quantizers because we are changing the configuration (8 levels -> 4 levels)
+            # This fixes the "9M Index" bug by forcing a fresh quantizer init (buffers reset to new config)
+            # sem_vq.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/sem_rfsq.pt", map_location=device)), strict=False)
+            # pro_vq.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/pro_rfsq.pt", map_location=device)), strict=False)
+            # spk_pq.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/spk_pq.pt", map_location=device)), strict=False)
+            pass
         except Exception as e:
             print(f"Error loading quantizers: {e}")
             
@@ -166,24 +178,35 @@ def main():
 
 
     # =========================================================================
-    # OPTIMIZER - FROZEN DECODER/QUANTIZERS
+    # OPTIMIZER
     # =========================================================================
-    print("🥶 Freezing Decoder, Quantizers, and Entropy Model...")
+    # FREEZE Decoder and Quantizers for Adaptation!
+    print("❄️ Freezing Decoder and Quantizers to preserve pretrained manifold...")
     for m in [decoder, sem_vq, pro_vq, spk_pq, entropy_model]:
+        m.eval() # Set to eval mode
         for p in m.parameters():
             p.requires_grad = False
+            
+    # Factorizer is the only thing adapting
+    for p in factorizer.parameters():
+        p.requires_grad = True
             
     # Verification
     print(f"Factorizer trainable: {any(p.requires_grad for p in factorizer.parameters())}")
     print(f"Decoder trainable: {any(p.requires_grad for p in decoder.parameters())}")
 
-    # Only optimize Factorizer
+    # Optimize ONLY Factorizer
     params = list(factorizer.parameters())
     
     optimizer = optim.AdamW(params, lr=float(config['training']['learning_rate']), betas=(0.8, 0.99))
     
-    max_steps = config['training']['max_steps'] # e.g. 120,000
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_steps)
+    # Optimization: Use torch.compile
+    if hasattr(torch, 'compile') and False:  # DISABLED for debugging speed
+        print("⚡ Enabling torch.compile...")
+        factorizer = torch.compile(factorizer)
+        decoder = torch.compile(decoder)
+    
+    # Scheduler will be initialized after global_step detection
 
     # =========================================================================
     # DATA
@@ -288,6 +311,11 @@ def main():
             
     print(f"Global Step: {global_step}")
     
+    # Initialize scheduler after global_step is known
+    max_steps = config['training']['max_steps']
+    num_adaptation_steps = max_steps - global_step
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_adaptation_steps, eta_min=1e-6)
+    
     pbar = tqdm(total=max_steps - global_step, desc="Adaptation")
 
     log_file = open(f"{args.checkpoint_dir}/training.log", "a")
@@ -303,8 +331,16 @@ def main():
             
             optimizer.zero_grad()
             
+            optimizer.zero_grad()
+            
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 sem, pro, spk = factorizer(features)
+                
+                # FIX: Scale down vectors to avoid FSQ saturation
+                # REMOVED: sem = sem * 0.1
+                # REMOVED: pro = pro * 0.1
+                # REMOVED: spk = spk * 0.1
+                
                 sem_z, sem_loss, sem_idx = sem_vq(sem)
                 pro_z, pro_loss, pro_idx = pro_vq(pro)
                 spk_z, spk_loss, _ = spk_pq(spk)
@@ -312,25 +348,35 @@ def main():
                 audio_hat = decoder(sem_z, pro_z, spk_z)
                 if audio_hat.dim() == 2: audio_hat = audio_hat.unsqueeze(1)
                 
+                # Optimization: Slice audio once
                 min_len = min(audio.shape[-1], audio_hat.shape[-1])
-                audio = audio[..., :min_len]
-                audio_hat = audio_hat[..., :min_len]
+                audio_sq = audio[..., :min_len].squeeze(1)
+                audio_hat_sq = audio_hat[..., :min_len].squeeze(1)
                 
-                # Entropy
+                # BPS estimation (WITH GRAD)
                 sem_bits, pro_bits = entropy_model.estimate_bits(
-                    sem_idx.view(sem_idx.size(0), -1).detach(),
-                    pro_idx.view(pro_idx.size(0), -1).detach()
+                    sem_idx.detach(), 
+                    pro_idx.detach()
                 )
-                entropy_loss = (sem_bits.mean() + pro_bits.mean()) * w_entropy
+                
+                # Backprop through EntropyModel
+                entropy_loss = (sem_bits.mean() + pro_bits.mean())
+                w_ent = config['training'].get('entropy_weight', 0.1)
+                entropy_loss = entropy_loss * w_ent
                 
                 # BPS
-                frames_per_sec = 50 / config['model']['semantic']['temporal_compression']
-                bits_per_frame = config['model']['rfsq_num_levels'] * 8 * 3
-                bps = torch.tensor(bits_per_frame * frames_per_sec, device=device)
+                duration_avg = audio_sq.shape[-1] / 16000.0
+                ent_bps = (sem_bits.mean() + pro_bits.mean()) / duration_avg
+
+                if global_step % 10 == 0:
+                    print(f"\nDEBUG STEP {global_step}:")
+                    print(f"  Sem Indices [0]: {sem_idx[0, :20].tolist()}")
+                    print(f"  Sem Indices Stats: Min={sem_idx.min()}, Max={sem_idx.max()}, Mean={sem_idx.float().mean():.2f}")
+                    print(f"  Pro Indices [0]: {pro_idx[0, :20].tolist()}")
+                    print(f"  Bits/Seq: Sem={sem_bits.mean().item():.1f}, Pro={pro_bits.mean().item():.1f}")
+                    print(f"  Sparsity Value: {sem.pow(2).mean().item():.6f}")
             
-            # Loss
-            audio_sq = audio.squeeze(1)
-            audio_hat_sq = audio_hat.squeeze(1)
+            # Loss computations - already using audio_sq / audio_hat_sq
             
             sc_loss, mag_loss = stft_loss_fn(audio_hat_sq, audio_sq)
             stft_loss = sc_loss + mag_loss
@@ -339,12 +385,19 @@ def main():
             flux_loss = spectral_flux_fn(audio_hat_sq, audio_sq)
             q_loss = sem_loss + pro_loss + spk_loss
             
+            # Sparsity Loss (L2 Reg) - Proxy for Entropy Minimization
+            # Forces latents towards 0 (center code), reducing information density.
+            # Weight 10000.0 makes loss ~200.0 (if val=0.02), competing with Recon (300.0)
+            sparsity_loss = (sem.pow(2).mean() + pro.pow(2).mean())
+            w_sparsity = 0.0 # Disabled for stability during adaptation 
+            
             loss = (
                 stft_loss * w_stft +
                 mel_loss * w_mel +
                 wave_loss * w_wave +
                 flux_loss * w_flux +
                 q_loss * w_commit +
+                sparsity_loss * w_sparsity +
                 entropy_loss
             )
             
@@ -354,7 +407,9 @@ def main():
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            # Relax gradient clipping heavily because entropy loss is ~16000
+            # Clipping to 1.0 was scaling all gradients (including Factorizer) to 0.
+            torch.nn.utils.clip_grad_norm_(params, 1000.0)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
@@ -370,7 +425,8 @@ def main():
                 "loss": f"{loss.item():.2f}",
                 "stft": f"{stft_loss.item():.2f}",
                 "mel": f"{mel_loss.item():.2f}",
-                "ent": f"{entropy_loss.item():.2f}",
+                "q": f"{q_loss.item():.2f}",
+                "spar": f"{sparsity_loss.item():.4f}",
                 "bps": f"{ent_bps.item():.0f}"
             }
             pbar.set_postfix(metrics)
@@ -378,8 +434,65 @@ def main():
             if global_step % 100 == 0:
                 log_file.write(f"Step {global_step}: {metrics}\n")
                 log_file.flush()
-                writer.add_scalar('Loss/total', loss.item(), global_step)
-                writer.add_scalar('Loss/mel', mel_loss.item(), global_step)
+                
+                # Detailed TensorBoard Logging
+                writer.add_scalar('Loss/Total', loss.item(), global_step)
+                writer.add_scalar('Loss/STFT', stft_loss.item(), global_step)
+                writer.add_scalar('Loss/Mel', mel_loss.item(), global_step)
+                writer.add_scalar('Loss/Waveform', wave_loss.item(), global_step)
+                writer.add_scalar('Loss/Flux', flux_loss.item(), global_step)
+                writer.add_scalar('Loss/Quantization', q_loss.item(), global_step)
+                writer.add_scalar('Loss/Entropy', entropy_loss.item(), global_step)
+                writer.add_scalar('Loss/Sparsity', sparsity_loss.item(), global_step)
+                
+                writer.add_scalar('Metrics/BPS', ent_bps.item(), global_step)
+                writer.add_scalar('Metrics/LearningRate', scheduler.get_last_lr()[0], global_step)
+
+                # ============================================================
+                # VISUALIZATION (Every 100 steps)
+                # ============================================================
+                if global_step % 100 == 0:
+                    try:
+                        # Take first sample
+                        with torch.no_grad():
+                            # Mel calculation
+                            mel_gt = mel_fn(audio_sq[0:1]).squeeze(0).cpu().numpy()
+                            mel_hat = mel_fn(audio_hat_sq[0:1]).squeeze(0).cpu().numpy()
+                            
+                            # Difference
+                            mel_diff = np.abs(mel_gt - mel_hat)
+                            
+                            fig, axs = plt.subplots(3, 1, figsize=(10, 12))
+                            
+                            # GT
+                            im0 = axs[0].imshow(mel_gt, origin='lower', aspect='auto', vmin=-11.5, vmax=2.0)
+                            axs[0].set_title(f"Step {global_step}: Ground Truth Mel")
+                            fig.colorbar(im0, ax=axs[0])
+                            
+                            # Recon
+                            im1 = axs[1].imshow(mel_hat, origin='lower', aspect='auto', vmin=-11.5, vmax=2.0)
+                            axs[1].set_title(f"Step {global_step}: Reconstruction Mel (Frozen Decoder)")
+                            fig.colorbar(im1, ax=axs[1])
+                            
+                            # Diff
+                            im2 = axs[2].imshow(mel_diff, origin='lower', aspect='auto', cmap='magma')
+                            axs[2].set_title(f"Step {global_step}: Difference (L1 Error)")
+                            fig.colorbar(im2, ax=axs[2])
+                            
+                            plt.tight_layout()
+                            save_path = f"{args.checkpoint_dir}/spectrograms/step_{global_step}.png"
+                            plt.savefig(save_path)
+                            plt.close(fig)
+                            print(f"  📸 Saved debug spectrogram to {save_path}")
+                            
+                            # Add to TensorBoard
+                            import torchvision
+                            # Normalize diff for visualization
+                            diff_norm = torch.from_numpy(mel_diff).unsqueeze(0) / (mel_diff.max() + 1e-6)
+                            writer.add_image('Vis/Difference', diff_norm, global_step)
+                            
+                    except Exception as e:
+                        print(f"⚠️ Visualization failed: {e}")
             
             if global_step % config['training'].get('save_every', 2000) == 0:
                 step_dir = f"{args.checkpoint_dir}/step_{global_step}"
@@ -394,6 +507,19 @@ def main():
                 
                 val_mel = validate()
                 print(f"\n  📊 Step {global_step}: Val MEL={val_mel:.3f}")
+                writer.add_scalar('Validation/MelL1', val_mel, global_step)
+                
+                # Log audio sample to TensorBoard
+                if audio_hat.dim() == 2:
+                    current_audio = audio_hat[0].unsqueeze(0).float().cpu() # (1, T)
+                elif audio_hat.dim() == 3:
+                    current_audio = audio_hat[0].float().cpu() # (1, T)
+                
+                # Check for audio validity (not NaN/Inf)
+                if not torch.isnan(current_audio).any() and not torch.isinf(current_audio).any():
+                     # Normalize for logging
+                     current_audio = current_audio / (torch.abs(current_audio).max() + 1e-6)
+                     writer.add_audio('Validation/Audio_Sample', current_audio, global_step, sample_rate=16000)
                 
             if global_step >= max_steps:
                 break
