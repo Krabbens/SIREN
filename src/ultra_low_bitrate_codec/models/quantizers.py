@@ -23,7 +23,16 @@ class FSQ(nn.Module):
         self.vocab_size = self._levels.prod().item()
     
     def bound(self, z):
-        return torch.tanh(z)
+        # Shift from tanh (which saturates and kills gradients for large inputs)
+        # to a standardized L2 normalization approach scaled by a learned parameter
+        # or just a simple bounded sigmoid that preserves gradient flow.
+        
+        # Simple scalable L2 norm (Project onto L2 sphere)
+        # z_norm = F.normalize(z, p=2, dim=-1)
+        # return z_norm * math.sqrt(self.dim) # Keep variance ~1
+        
+        # Alternative: use sigmoid-based bounding [-1, 1] which is softer than tanh
+        return 2 * torch.sigmoid(z) - 1
     
     def quantize(self, z):
         levels = self._levels.to(z.device)
@@ -259,6 +268,237 @@ class ProductQuantizer(nn.Module):
         if T == 1 and self.input_dim == x_q.shape[-1]: # Handle squeezing if needed
              pass 
              
+        return x_q
+
+
+class BinaryTreeCodebook(nn.Module):
+    """
+    Binary Tree Codebook — O(log N) memory representation of N codes.
+    
+    Instead of storing N vectors explicitly [O(N × D) memory],
+    we store `depth` levels with 2 vectors each [O(depth × D) memory].
+    
+    Each codeword is the SUM of one vector chosen per level:
+        code[i] = sum(level[k][bit_k(i)] for k in 0..depth-1)
+    
+    This gives 2^depth distinct codes using only 2 × depth × D parameters.
+    
+    Example: depth=8 → 256 codes using 16 vectors instead of 256.
+    
+    Encoding: greedy residual search (top-down tree traversal)
+    Decoding: bit decomposition → additive reconstruction
+    """
+    def __init__(self, depth, dim):
+        super().__init__()
+        self.depth = depth
+        self.dim = dim
+        self.codebook_size = 2 ** depth
+        
+        # Each level: 2 learned vectors (binary choice at each tree level)
+        # Shape per level: (2, dim)
+        self.levels = nn.ParameterList([
+            nn.Parameter(torch.randn(2, dim) * (0.02 / math.sqrt(depth)))
+            for _ in range(depth)
+        ])
+    
+    @property
+    def memory_params(self):
+        """Number of parameters in codebook."""
+        return 2 * self.depth * self.dim
+    
+    @property
+    def flat_equivalent_params(self):
+        """Equivalent flat codebook parameters."""
+        return self.codebook_size * self.dim
+    
+    @property
+    def compression_ratio(self):
+        """Memory compression vs flat codebook."""
+        return self.flat_equivalent_params / self.memory_params
+    
+    def decode(self, indices):
+        """
+        Reconstruct vectors from integer indices.
+        
+        Args:
+            indices: (...,) integer tensor, values in [0, 2^depth)
+        Returns:
+            vectors: (..., dim) reconstructed codebook entries
+        """
+        result = torch.zeros(*indices.shape, self.dim, 
+                            device=indices.device, dtype=self.levels[0].dtype)
+        
+        for k in range(self.depth):
+            bit = (indices >> k) & 1  # (...,) 0 or 1
+            # Index into level's 2 vectors using bit
+            vec = self.levels[k][bit]  # (..., dim)
+            result = result + vec
+        
+        return result
+    
+    def encode(self, x):
+        """
+        Find nearest code via greedy residual tree traversal.
+        
+        At each level, pick the vector (0 or 1) that minimizes
+        the residual, then subtract it and continue to next level.
+        
+        Args:
+            x: (..., dim) input vectors
+        Returns:
+            indices: (...,) integer indices in [0, 2^depth)
+        """
+        residual = x
+        indices = torch.zeros(x.shape[:-1], dtype=torch.long, device=x.device)
+        
+        for k in range(self.depth):
+            v0 = self.levels[k][0]  # (dim,)
+            v1 = self.levels[k][1]  # (dim,)
+            
+            # Distance from residual to each option
+            d0 = torch.sum((residual - v0) ** 2, dim=-1)  # (...,)
+            d1 = torch.sum((residual - v1) ** 2, dim=-1)  # (...,)
+            
+            bit = (d1 < d0).long()  # 1 if v1 is closer
+            
+            # Gather chosen vector
+            chosen = self.levels[k][bit]  # (..., dim)
+            
+            # Update residual
+            residual = residual - chosen
+            
+            # Accumulate bit into index
+            indices = indices + bit * (2 ** k)
+        
+        return indices
+    
+    def forward(self, x):
+        """
+        Quantize input vectors.
+        
+        Args:
+            x: (..., dim) input vectors
+        Returns:
+            x_q: (..., dim) quantized (with STE gradient)
+            loss: scalar commitment loss
+            indices: (...,) codebook indices
+        """
+        indices = self.encode(x)
+        x_q = self.decode(indices)
+        
+        # Commitment loss (EMA-style, both directions)
+        loss = F.mse_loss(x_q.detach(), x) + F.mse_loss(x_q, x.detach())
+        
+        # Straight-through estimator
+        x_q = x + (x_q - x).detach()
+        
+        return x_q, loss, indices
+
+
+class TreeProductQuantizer(nn.Module):
+    """
+    Product Quantizer with Binary Tree Codebooks — O(G × log N × D/G) memory.
+    
+    Drop-in replacement for ProductQuantizer, but each group uses a
+    BinaryTreeCodebook instead of a flat nn.Embedding.
+    
+    Memory comparison (for input_dim=256, 8 groups, 256 codes):
+        Flat PQ:  8 × 256 × 32 = 65,536 params
+        Tree PQ:  8 × 8 × 2 × 32 = 4,096 params  (16× smaller)
+    """
+    def __init__(self, input_dim, num_groups, codes_per_group=256):
+        super().__init__()
+        self.input_dim = input_dim
+        self.num_groups = num_groups
+        self.codes_per_group = codes_per_group
+        
+        assert input_dim % num_groups == 0
+        self.group_dim = input_dim // num_groups
+        
+        # Depth = log2(codes_per_group)
+        self.depth = int(math.log2(codes_per_group))
+        assert 2 ** self.depth == codes_per_group, \
+            f"codes_per_group must be power of 2, got {codes_per_group}"
+        
+        self.codebooks = nn.ModuleList([
+            BinaryTreeCodebook(self.depth, self.group_dim)
+            for _ in range(num_groups)
+        ])
+        
+        # Report memory savings
+        tree_params = sum(cb.memory_params for cb in self.codebooks)
+        flat_params = sum(cb.flat_equivalent_params for cb in self.codebooks)
+        self._tree_params = tree_params
+        self._flat_params = flat_params
+    
+    def memory_report(self):
+        """Return human-readable memory comparison."""
+        return (f"TreePQ: {self._tree_params:,} params vs "
+                f"FlatPQ: {self._flat_params:,} params "
+                f"({self._flat_params / self._tree_params:.1f}× compression)")
+    
+    def forward(self, x):
+        """
+        Args:
+            x: (B, D) or (B, T, D) input
+        Returns:
+            x_q: same shape, quantized (STE gradient)
+            loss: scalar
+            indices: (B, [T,] num_groups) integer indices
+        """
+        original_shape = x.shape
+        if len(x.shape) == 2:
+            x = x.unsqueeze(1)
+        
+        B, T, D = x.shape
+        x_groups = x.view(B, T, self.num_groups, self.group_dim)
+        
+        quantized_groups = []
+        indices_list = []
+        total_loss = 0
+        
+        for i, codebook in enumerate(self.codebooks):
+            x_g = x_groups[:, :, i, :]  # (B, T, group_dim)
+            
+            x_q_g, loss_g, idx_g = codebook(x_g)
+            
+            quantized_groups.append(x_q_g)
+            indices_list.append(idx_g)  # (B, T)
+            total_loss = total_loss + loss_g
+        
+        x_q = torch.cat(quantized_groups, dim=-1).view(original_shape)
+        indices = torch.stack(indices_list, dim=-1)
+        
+        if len(original_shape) == 2:
+            indices = indices.squeeze(1)
+        
+        return x_q, total_loss, indices
+    
+    def from_indices(self, indices):
+        """
+        Reconstruct from indices.
+        
+        Args:
+            indices: (B, num_groups) or (B, T, num_groups)
+        Returns:
+            x_q: (B, [T,] input_dim)
+        """
+        if indices.dim() == 2:
+            indices = indices.unsqueeze(1)
+        
+        B, T, G = indices.shape
+        quantized_groups = []
+        
+        for i, codebook in enumerate(self.codebooks):
+            idx = indices[:, :, i]  # (B, T)
+            x_q_g = codebook.decode(idx)  # (B, T, group_dim)
+            quantized_groups.append(x_q_g)
+        
+        x_q = torch.cat(quantized_groups, dim=-1)
+        
+        if T == 1:
+            x_q = x_q.squeeze(1)
+        
         return x_q
 
 

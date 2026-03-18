@@ -187,6 +187,70 @@ class SpectralFluxLoss(nn.Module):
 
 
 # =============================================================================
+# PHASE-GRADIENT LOSSES
+# =============================================================================
+
+class InstantaneousFrequencyLoss(nn.Module):
+    """
+    Penalizes differences in instantaneous frequency (temporal derivative of phase).
+    Crucial for temporal coherence and preventing "phasiness".
+    """
+    def __init__(self, n_fft: int = 1024, hop_length: int = 320):
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.register_buffer("window", torch.hann_window(n_fft))
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        # x, y: (B, T)
+        x_stft = torch.stft(x, self.n_fft, self.hop_length, window=self.window, return_complex=True)
+        y_stft = torch.stft(y, self.n_fft, self.hop_length, window=self.window, return_complex=True)
+        
+        # Phase (B, F, T)
+        x_phase = x_stft.angle()
+        y_phase = y_stft.angle()
+        
+        # Temporal derivative (along T)
+        x_if = torch.diff(x_phase, dim=-1)
+        y_if = torch.diff(y_phase, dim=-1)
+        
+        # Wrap to [-pi, pi]
+        diff = x_if - y_if
+        diff = diff - 2 * torch.pi * (diff / (2 * torch.pi)).round()
+        
+        return torch.mean(torch.abs(diff))
+
+
+class GroupDelayLoss(nn.Module):
+    """
+    Penalizes differences in group delay (frequency derivative of phase).
+    Ensures that frequency components are correctly aligned in time.
+    """
+    def __init__(self, n_fft: int = 1024, hop_length: int = 320):
+        super().__init__()
+        self.n_fft = n_fft
+        self.hop_length = hop_length
+        self.register_buffer("window", torch.hann_window(n_fft))
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        x_stft = torch.stft(x, self.n_fft, self.hop_length, window=self.window, return_complex=True)
+        y_stft = torch.stft(y, self.n_fft, self.hop_length, window=self.window, return_complex=True)
+        
+        x_phase = x_stft.angle()
+        y_phase = y_stft.angle()
+        
+        # Frequency derivative (along F)
+        x_gd = torch.diff(x_phase, dim=-2)
+        y_gd = torch.diff(y_phase, dim=-2)
+        
+        # Wrap to [-pi, pi]
+        diff = x_gd - y_gd
+        diff = diff - 2 * torch.pi * (diff / (2 * torch.pi)).round()
+        
+        return torch.mean(torch.abs(diff))
+
+
+# =============================================================================
 # LEGACY LOSSES (kept for compatibility, use sparingly)
 # =============================================================================
 

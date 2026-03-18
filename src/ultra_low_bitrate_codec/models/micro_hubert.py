@@ -63,9 +63,9 @@ class MicroHuBERT(nn.Module):
         self, 
         hidden_dim=256, 
         output_dim=768, 
-        num_layers=4, 
-        num_heads=4,
-        ff_mult=3
+        num_layers=6, # Standard for 5M
+        num_heads=8,
+        ff_mult=4
     ):
         super().__init__()
         
@@ -101,6 +101,8 @@ class MicroHuBERT(nn.Module):
         x = self.encoder(x) # (B, 256, T_frames)
         x = x.transpose(1, 2) # (B, T_frames, 256)
         
+        cnn_feat = x # Keep raw acoustic features (pitch/timbre)
+        
         # 2. Add Positional Embeddings
         seq_len = x.size(1)
         if seq_len > self.pos_emb.size(1):
@@ -118,7 +120,7 @@ class MicroHuBERT(nn.Module):
         # 4. Project to HuBERT dim
         x = self.out_proj(x) # (B, T, 768)
         
-        return x
+        return x, cnn_feat
 
 if __name__ == "__main__":
     # San Force Check

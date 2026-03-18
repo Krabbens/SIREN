@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import math
 
 from .bitlinear import BitLinear, RMSNorm
+from .infinity_bottleneck import InfinityBottleneck
 
 
 class ConvBlock(nn.Module):
@@ -142,6 +143,9 @@ class MicroEncoder(nn.Module):
         self.final_norm = RMSNorm(hidden_dim)
         self.output_proj = nn.Linear(hidden_dim, output_dim)
         
+        # Infinity Bottleneck (Disabled by default)
+        self.infinity_bottleneck = None
+        
         self._init_weights()
         
     def _init_weights(self):
@@ -154,6 +158,15 @@ class MicroEncoder(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+    
+    def enable_infinity_bottleneck(self, downsample_factor=4, num_layers=2):
+        """Standard method to enable compression via Infinity Attention"""
+        print(f"  [MicroEncoder] Enabling Infinity Bottleneck (factor={downsample_factor}, layers={num_layers})")
+        self.infinity_bottleneck = InfinityBottleneck(
+            dim=self.hidden_dim, 
+            num_layers=num_layers,
+            downsample_factor=downsample_factor
+        ).to(next(self.parameters()).device)
     
     def forward(self, x):
         """
@@ -171,6 +184,10 @@ class MicroEncoder(nn.Module):
         # Transformer layers
         for layer in self.layers:
             x = layer(x)
+        
+        # Infinity Bottleneck (Compression)
+        if self.infinity_bottleneck is not None:
+            x = self.infinity_bottleneck(x)
         
         # Output projection
         x = self.final_norm(x)

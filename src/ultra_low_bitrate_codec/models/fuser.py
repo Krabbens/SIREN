@@ -167,7 +167,7 @@ class ConditionFuserV2(nn.Module):
     Total extra params: ~100K (vs 140K+ for multi-head attention)
     """
     def __init__(self, sem_dim=8, pro_dim=8, spk_dim=256, out_dim=512, 
-                 sem_upsample=4, pro_upsample=8):
+                 sem_upsample=4, pro_upsample=8, smooth_kernel=3):
         super().__init__()
         self.out_dim = out_dim
         self.hidden_dim = out_dim // 2  # 256 for efficiency
@@ -195,13 +195,12 @@ class ConditionFuserV2(nn.Module):
         )
         
         # Temporal smoothing (1D Gaussian)
-        self.smooth = nn.Conv1d(out_dim, out_dim, kernel_size=5, padding=2, groups=out_dim, bias=False)
-        self._init_gaussian_kernel()
+        self.smooth = nn.Conv1d(out_dim, out_dim, kernel_size=smooth_kernel, padding=smooth_kernel//2, groups=out_dim, bias=False)
+        self._init_gaussian_kernel(smooth_kernel)
         
-    def _init_gaussian_kernel(self):
+    def _init_gaussian_kernel(self, k):
         with torch.no_grad():
-            sigma = 1.0
-            k = 5
+            sigma = 0.8 if k == 3 else 1.2 # Adjust sigma for kernel size
             x = torch.arange(k).float() - k // 2
             gauss = torch.exp(-0.5 * x**2 / sigma**2)
             gauss = gauss / gauss.sum()

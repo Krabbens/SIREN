@@ -241,21 +241,14 @@ def download_common_voice_pl(output_dir: str, max_hours: float = None, cache_dir
     # CV 11.0 usually requires auth. If fails, user needs to login via `huggingface-cli login`.
     
     try:
-        # trust_remote_code is not needed/supported for canonical datasets usually
-        ds = load_dataset("mozilla-foundation/common_voice_11_0", "pl", split="train", cache_dir=cache_dir)
-        # Cast audio to 16kHz
+        # VoxPopuli Parquet format works out of the box
+        ds = load_dataset("facebook/voxpopuli", "pl", split="train", cache_dir=cache_dir, streaming=True)
         ds = ds.cast_column("audio", Audio(sampling_rate=16000))
     except Exception as e:
-        print(f"❌ Error loading Common Voice 11.0: {e}")
-        print("🔄 Trying older version 'common_voice'...")
-        try:
-             ds = load_dataset("common_voice", "pl", split="train", cache_dir=cache_dir)
-             ds = ds.cast_column("audio", Audio(sampling_rate=16000))
-        except Exception as e2:
-             print(f"❌ Error loading fallback 'common_voice': {e2}")
-             return None, None
-
-    print(f"📊 Dataset size: {len(ds)} samples")
+        print(f"❌ Error loading VoxPopuli: {e}")
+        raise e
+        
+    print("📊 Dataset stream initialized")
 
     speaker_ids = set()
     train_manifest = []
@@ -265,43 +258,48 @@ def download_common_voice_pl(output_dir: str, max_hours: float = None, cache_dir
     max_duration_seconds = max_hours * 3600 if max_hours else float('inf')
     
     # Process
-    for i, sample in enumerate(tqdm(ds, desc="Processing Common Voice PL")):
-        audio_array = sample['audio']['array']
-        sr = sample['audio']['sampling_rate'] # Should be 16000 now
-        
-        duration = len(audio_array) / sr
-        
-        if total_duration >= max_duration_seconds:
-            print(f"⏱️ Reached max duration limit, stopping.")
-            break
+    try:
+        for i, sample in enumerate(tqdm(ds, desc="Processing Common Voice PL")):
+            audio_array = sample['audio']['array']
+            sr = sample['audio']['sampling_rate'] # Should be 16000 now
             
-        if duration < 1.0 or duration > 15.0:
-            continue
+            duration = len(audio_array) / sr
             
-        client_id = sample['client_id']
-        # Shorten client_id for speaker_id
-        speaker_id = f"cv_{client_id[:12]}"
-        speaker_ids.add(speaker_id)
-        
-        filename = f"{speaker_id}_{i}.wav"
-        filepath = audio_dir / filename
-        
-        sf.write(str(filepath), audio_array, sr)
-        
-        entry = {
-            "audio_path": str(filepath),
-            "duration": duration,
-            "speaker_id": speaker_id,
-            "text": sample.get('sentence', '')
-        }
-        
-        # 95/5 split
-        if i % 20 == 0:
-            val_manifest.append(entry)
-        else:
-            train_manifest.append(entry)
+            if total_duration >= max_duration_seconds:
+                print(f"⏱️ Reached max duration limit, stopping.")
+                break
+                
+            if duration < 1.0 or duration > 15.0:
+                continue
+                
+            client_id = str(sample.get('client_id', sample.get('speaker_id', f'spk_{i}')))
+            # Shorten client_id for speaker_id
+            speaker_id = f"cv_{client_id[:12]}"
+            speaker_ids.add(speaker_id)
             
-        total_duration += duration
+            filename = f"{speaker_id}_{i}.wav"
+            filepath = audio_dir / filename
+            
+            sf.write(str(filepath), audio_array, sr)
+            
+            entry = {
+                "audio_path": str(filepath),
+                "duration": duration,
+                "speaker_id": speaker_id,
+                "text": sample.get('sentence', sample.get('normalized_text', sample.get('raw_text', '')))
+            }
+            
+            # 95/5 split
+            if i % 20 == 0:
+                val_manifest.append(entry)
+            else:
+                train_manifest.append(entry)
+                
+            total_duration += duration
+            
+    except Exception as e:
+        print(f"❌ Failed during iteration: {e}")
+        raise e
         
     # Save manifests
     train_path = output_path / "cv_pl_train.json"

@@ -152,6 +152,9 @@ class ConditionalFlowMatching(nn.Module):
             nn.Linear(self.hidden_dim * 4, self.hidden_dim)
         )
         
+        # Positional Embedding for x_t (improve temporal awareness)
+        self.pos_embed = SinusoidalPosEmbed(self.hidden_dim)
+        
         # Input Projection: Mel (out_dim) -> hidden_dim
         # Use standard Linear for the entry layer to preserve input precision
         self.input_proj = nn.Linear(self.out_dim, self.hidden_dim) 
@@ -187,6 +190,11 @@ class ConditionalFlowMatching(nn.Module):
         # Project input to hidden dim
         x = self.input_proj(x_t)
         
+        # Add positional encoding to x (noisified mel)
+        T = x.shape[1]
+        pos = torch.arange(T, device=x.device).float()
+        x = x + self.pos_embed(pos).unsqueeze(0)
+        
         # Merge conditioning with time embedding
         # This becomes the 'c' for AdaLN
         c = cond + t_emb
@@ -202,12 +210,13 @@ class ConditionalFlowMatching(nn.Module):
         
         return v_pred
 
-    def compute_loss(self, x_1, cond):
+    def compute_loss(self, x_1, cond, l1_weight=0.0):
         """
         Compute Flow Matching Loss.
         Args:
             x_1: (B, T, out_dim) Target data (Mel spectrogram)
             cond: (B, T, hidden_dim) Conditioning
+            l1_weight: Weight for L1 loss on velocity (sharpening)
         Returns:
             loss: Scalar loss
         """
@@ -233,7 +242,14 @@ class ConditionalFlowMatching(nn.Module):
         v_pred = self(x_t, t, cond)
         
         # Loss
-        return F.mse_loss(v_pred, u_t)
+        # MSE is standard for OT-CFM
+        loss = F.mse_loss(v_pred, u_t)
+        
+        # L1 Loss (Sharpening)
+        if l1_weight > 0:
+            loss = loss + l1_weight * F.l1_loss(v_pred, u_t)
+            
+        return loss
 
     def solve_ode(self, cond, steps=10, solver='euler', cfg_scale=1.0):
         # Reuse existing solve_ode logic but ensure shapes are consistent

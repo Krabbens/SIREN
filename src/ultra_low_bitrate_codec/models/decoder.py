@@ -296,10 +296,9 @@ class SpeechDecoderV2(nn.Module):
     def __init__(self, config):
         super().__init__()
         try:
-            from .vocoder import NeuralVocoderV2
-        except ImportError:
-            # Fallback for when vocoder.py is missing/renamed
             from .bit_vocoder import NeuralVocoderBit as NeuralVocoderV2
+        except ImportError:
+            from .vocoder import NeuralVocoderV2
         
         self.reconstructor = FeatureReconstructorV2(config)
         self.vocoder = NeuralVocoderV2(config)

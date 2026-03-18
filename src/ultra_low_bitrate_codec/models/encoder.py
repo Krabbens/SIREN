@@ -187,6 +187,10 @@ class InformationFactorizerV2(nn.Module):
         spk_cfg = config['model']['speaker']
         
         input_dim = 768  # HuBERT dimension
+        cnn_dim = config['model'].get('cnn_dim', 256)    # CNN feature dimension (e.g. 256 for Micro, 384 for Bit)
+        
+        # Projection for CNN features
+        self.acoustic_proj = BitLinear(cnn_dim, input_dim, bias=True)
         
         # ========================================
         # SPEAKER BRANCH (Global)
@@ -224,8 +228,9 @@ class InformationFactorizerV2(nn.Module):
         self.semantic_proj = nn.Sequential(
             BitLinear(sem_cfg['hidden_dim'], sem_cfg['hidden_dim'], bias=True),
             BitSnakeBeta(sem_cfg['hidden_dim']),
-            BitLinear(sem_cfg['hidden_dim'], sem_cfg['output_dim'], bias=True),
-            RMSNorm(sem_cfg['output_dim'])
+            nn.Linear(sem_cfg['hidden_dim'], sem_cfg['output_dim'], bias=True)
+            # Replaced BitLinear with nn.Linear for the final bound projection
+            # to prevent discrete initialization from collapsing into a single FSQ bin.
         )
         
         # ========================================
@@ -243,35 +248,54 @@ class InformationFactorizerV2(nn.Module):
         self.prosody_proj = nn.Sequential(
             BitLinear(pro_cfg['hidden_dim'], pro_cfg['hidden_dim'], bias=True),
             BitSnakeBeta(pro_cfg['hidden_dim']),
-            BitLinear(pro_cfg['hidden_dim'], pro_cfg['output_dim'], bias=True),
-            RMSNorm(pro_cfg['output_dim'])
+            nn.Linear(pro_cfg['hidden_dim'], pro_cfg['output_dim'], bias=True)
+            # Replaced BitLinear with nn.Linear.
         )
         
-    def forward(self, x):
+        # Manually initialize the final linear layers with a larger variance
+        # to ensure initial predictions span across multiple FSQ bins.
+        nn.init.normal_(self.semantic_proj[2].weight, std=0.5)
+        nn.init.zeros_(self.semantic_proj[2].bias)
+        nn.init.normal_(self.prosody_proj[2].weight, std=0.5)
+        nn.init.zeros_(self.prosody_proj[2].bias)
+        
+    def forward(self, x, x_acoustic=None):
         """
         Args:
-            x: HuBERT features (B, T, 768)
+            x: HuBERT features (B, T, 768) - Semantic
+            x_acoustic: CNN features (B, T, 256) - Prosody/Speaker
         Returns:
             semantic: (B, T/4, output_dim)
             prosody: (B, T/8, output_dim)
             speaker: (B, speaker_dim)
         """
-        # 1. Extract speaker (global)
-        attn_weights = self.speaker_attn(x)  # (B, T, 1)
-        speaker_feat = torch.sum(x * attn_weights, dim=1)  # (B, 768)
+        # If x_acoustic is not provided (legacy), use x (projected if needed, but x is 768)
+        # Actually x is 768. If we want to use x for acoustic, we use it directly.
+        if x_acoustic is None:
+            # Fallback for legacy scripts
+            feat_acoustic = x 
+        else:
+            feat_acoustic = self.acoustic_proj(x_acoustic)
+            
+        # 1. Extract speaker (global) from ACOUSTIC features
+        attn_weights = self.speaker_attn(feat_acoustic)  # (B, T, 1)
+        speaker_feat = torch.sum(feat_acoustic * attn_weights, dim=1)  # (B, 768)
         speaker_emb = self.speaker_encoder(speaker_feat)  # (B, 256)
         
         # 2. Remove speaker from content (explicit disentanglement)
+        # Content comes from SEMANTIC features (Transformer output)
         speaker_expanded = self.speaker_to_content(speaker_emb)  # (B, 768)
         x_content = x - speaker_expanded.unsqueeze(1)  # Subtract speaker info
         
-        # 3. Extract semantic
+        # 3. Extract semantic from CONTENT (Transformer - Speaker)
         semantic = self.semantic_reducer(x_content)
         semantic = self.semantic_encoder(semantic)
         semantic = self.semantic_proj(semantic)
         
-        # 4. Extract prosody
-        prosody = self.prosody_reducer(x)
+        # 4. Extract prosody from ACOUSTIC features (CNN)
+        # We don't subtract speaker from prosody? Ideally we should, but prosody is entangled with speaker.
+        # Let's keep it raw from acoustic.
+        prosody = self.prosody_reducer(feat_acoustic)
         prosody = self.prosody_encoder(prosody)
         prosody = self.prosody_proj(prosody)
         

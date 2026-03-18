@@ -12,16 +12,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
+import os
+
 try:
-    # Try absolute first, then relative
     try:
-        from ultra_low_bitrate_codec.kernels.bitnet_triton_packed import triton_bit_linear
+        from ultra_low_bitrate_codec.kernels.bitnet_triton_packed import triton_bit_linear, pack_ternary
     except ImportError:
-        from .kernels.bitnet_triton_packed import triton_bit_linear
-    HAS_TRITON = True
+        from .kernels.bitnet_triton_packed import triton_bit_linear, pack_ternary
+    HAS_TRITON = not os.environ.get('DISABLE_TRITON', '')
+    if not HAS_TRITON:
+        print("[BitLinear] Triton kernel DISABLED via DISABLE_TRITON env var")
 except ImportError:
     HAS_TRITON = False
-    # No print here to avoid flooding logs
+    pack_ternary = None
 
 class RMSNorm(nn.Module):
     # ... (Keep existing RMSNorm) ...
@@ -35,10 +38,10 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
     
     def forward(self, x):
-        # x: (B, C, T) for conv or (B, T, C) for linear
-        # Optimization: Use torch.mean directly on last dim
-        rms = torch.rsqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-        return x * rms * self.weight
+        # Cast to fp32 for stable variance calculation (prevents bfloat16 overflow over time)
+        x_fp32 = x.float()
+        rms = torch.rsqrt(torch.mean(x_fp32 ** 2, dim=-1, keepdim=True) + self.eps)
+        return (x_fp32 * rms).type_as(x) * self.weight
 
 @torch.jit.script
 def ste_sign(x):
@@ -46,7 +49,7 @@ def ste_sign(x):
 
 @torch.jit.script
 def weight_quant_ternary(w):
-    scale = w.abs().mean().clamp(min=1e-5)
+    scale = w.abs().mean().clamp(min=1e-4)
     w_normalized = w / scale
     w_quantized = torch.round(w_normalized.clamp(-1, 1))
     return (w_quantized - w_normalized).detach() + w_normalized, scale
@@ -55,6 +58,8 @@ def weight_quant_ternary(w):
 def activation_quant_8bit(x, num_bits: int = 8):
     Qn = -(2 ** (num_bits - 1))
     Qp = 2 ** (num_bits - 1) - 1
+    # Guard against NaN/Inf propagation from upstream
+    x = torch.nan_to_num(x, nan=0.0, posinf=1e4, neginf=-1e4)
     scale = x.abs().max().clamp(min=1e-5)
     x_scaled = x / scale * Qp
     x_quant = torch.round(x_scaled.clamp(Qn, Qp))
@@ -62,10 +67,11 @@ def activation_quant_8bit(x, num_bits: int = 8):
     return x_quant / Qp * scale
 
 class BitLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False):
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, norm_input: bool = True):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.norm_input = norm_input
         
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
@@ -73,36 +79,51 @@ class BitLinear(nn.Module):
         else:
             self.register_parameter('bias', None)
         
-        self.norm = RMSNorm(in_features)
+        if norm_input:
+            self.norm = RMSNorm(in_features)
+        else:
+            self.register_parameter('norm', None)
         self._init_weights()
+        
+        # Packed weight cache (invalidated when weight changes)
+        self._cached_w_packed = None
+        self._cached_K_aligned = None
+        self._cached_weight_version = None
     
     def _init_weights(self):
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
     
+    def _get_packed_weights(self, w_quant):
+        """Return cached packed weights, re-packing only when needed."""
+        # Use data_ptr as a cheap version check — changes after optimizer step
+        current_version = self.weight.data_ptr()
+        if (self._cached_w_packed is not None 
+            and self._cached_weight_version == current_version
+            and not self.training):
+            return self._cached_w_packed, self._cached_K_aligned
+        
+        w_packed, K_aligned = pack_ternary(w_quant)
+        
+        # Only cache in eval mode (weights don't change)
+        if not self.training:
+            self._cached_w_packed = w_packed
+            self._cached_K_aligned = K_aligned
+            self._cached_weight_version = current_version
+        
+        return w_packed, K_aligned
+    
     def forward(self, x):
-        # Normalize input
-        x = self.norm(x)
+        if self.norm_input and self.norm is not None:
+            x = self.norm(x)
         
         if HAS_TRITON and x.is_cuda and self.weight.is_cuda:
-            # Use Fused Triton Kernel
-            # We need to quantize weights to get the scale and the ternary values
-            # The kernel wrapper handles packing and execution
-            
-            # Note: weight_quant_ternary returns (w_hard + grad_trick), scale
-            # We need the 'hard' ternary values for packing.
-            # But during training, we also need gradients to flow back to self.weight.
-            # Our Autograd Function takes `weight` (ternary) as input.
-            
-            # So we must perform the weight quantization logic here to get the 'ternary' input for the kernel.
-            # (Which seems redundant if we pack it immediately, but necessary for STE graph connectivity)
-            
             w_quant, w_scale = weight_quant_ternary(self.weight)
             
-            # Fused Matmul: Quantizes X (Int8) and uses Packed W (Int2)
-            out = triton_bit_linear(x, w_quant, w_scale)
+            # Get (cached) packed weights
+            w_packed, K_aligned = self._get_packed_weights(w_quant)
             
-            if self.bias is not None:
-                out = out + self.bias
+            # v3 kernel: fused matmul + optional bias epilogue
+            out = triton_bit_linear(x, w_quant, w_scale, self.bias, w_packed, K_aligned)
             return out
         else:
             # Fallback
@@ -128,7 +149,8 @@ class BitConv1d(nn.Module):
         padding: int = 0,
         dilation: int = 1,
         groups: int = 1,
-        bias: bool = False
+        bias: bool = False,
+        norm_input: bool = True
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -138,6 +160,7 @@ class BitConv1d(nn.Module):
         self.padding = padding
         self.dilation = dilation
         self.groups = groups
+        self.norm_input = norm_input
         
         # Full precision weights for training
         self.weight = nn.Parameter(
@@ -150,7 +173,10 @@ class BitConv1d(nn.Module):
             self.register_parameter('bias', None)
         
         # RMSNorm applied channel-wise
-        self.norm = RMSNorm(in_channels)
+        if norm_input:
+            self.norm = RMSNorm(in_channels)
+        else:
+            self.register_parameter('norm', None)
         
         self._init_weights()
     
@@ -169,9 +195,10 @@ class BitConv1d(nn.Module):
         B, C, T = x.shape
         
         # Apply RMSNorm (need to permute for channel-last norm)
-        x = x.transpose(1, 2)  # (B, T, C)
-        x = self.norm(x)
-        x = x.transpose(1, 2)  # (B, C, T)
+        if self.norm_input and self.norm is not None:
+            x = x.transpose(1, 2)  # (B, T, C)
+            x = self.norm(x)
+            x = x.transpose(1, 2)  # (B, C, T)
         
         # Quantize activations
         x_quant = activation_quant_8bit(x)

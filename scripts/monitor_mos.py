@@ -40,11 +40,13 @@ def load_vocoder(ckpt_path, device):
     # Match config from training (80 bands, 256 dim)
     vocoder = BitVocoder(
         input_dim=80, 
-        dim=256, 
+        dim=512, 
         n_fft=1024, 
         hop_length=320, 
-        num_layers=4, 
-        num_res_blocks=1
+        num_layers=6, 
+        num_res_blocks=2,
+        use_lpc=True,
+        lpc_order=128
     ).to(device)
     
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -59,7 +61,7 @@ def load_vocoder(ckpt_path, device):
     return vocoder
 
 def main():
-    CHECKPOINT_DIR = "checkpoints/vocoder_80band_stft"
+    CHECKPOINT_DIR = "checkpoints/vocoder_80band_tlpc_hifi"
     TEST_AUDIO = "data/jakubie.wav"
     HISTORY_FILE = os.path.join(CHECKPOINT_DIR, "mos_history.csv")
     PLOT_FILE = os.path.join(CHECKPOINT_DIR, "mos_history.png")
@@ -137,9 +139,15 @@ def main():
                 # 3. Vocode
                 audio_hat = vocoder(mel_in)
                 
+            # Normalize for consistent MOS measurement
+            audio_np = audio_hat.squeeze().cpu().numpy()
+            peak = np.abs(audio_np).max()
+            if peak > 0:
+                audio_np = audio_np / peak * 0.95
+                
             # Save Temp
             out_path = os.path.join(CHECKPOINT_DIR, f"temp_mos_epoch{epoch}.wav")
-            sf.write(out_path, audio_hat.squeeze().cpu().numpy(), 16000)
+            sf.write(out_path, audio_np, 16000)
             
             # Measure MOS
             mos = measure_mos(out_path)
@@ -169,7 +177,7 @@ def main():
             print(f"Updated plot: {PLOT_FILE}")
             
             # Copy to artifacts for user visibility
-            os.system(f"cp {PLOT_FILE} /home/sperm/.gemini/antigravity/brain/0eb58771-53f4-4dc3-ad59-1d3cb3abd595/mos_history.png")
+            os.system(f"cp {PLOT_FILE} /home/sperm/.gemini/antigravity/brain/05b14d5b-e6f1-4387-955e-5899d9d379d7/mos_history.png")
 
         time.sleep(60) # Watch every minute
 

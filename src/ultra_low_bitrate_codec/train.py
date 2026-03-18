@@ -38,6 +38,23 @@ def fix_state_dict_keys(state_dict: dict) -> dict:
     return {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 
 
+def dynamic_collate(batch):
+    """
+    Collate function to pad features and audio to the max length in the batch.
+    """
+    # batch is list of dicts: {'features': tensor, 'audio': tensor}
+    features = [b['features'] for b in batch]
+    audios = [b['audio'] for b in batch]
+    
+    # Pad features (T, D) -> (B, T_max, D)
+    features_padded = torch.nn.utils.rnn.pad_sequence(features, batch_first=True, padding_value=0.0)
+    
+    # Pad audio (L) -> (B, L_max)
+    audios_padded = torch.nn.utils.rnn.pad_sequence(audios, batch_first=True, padding_value=0.0)
+    
+    return {'features': features_padded, 'audio': audios_padded}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
@@ -84,6 +101,15 @@ def main():
     factorizer = InformationFactorizerV2(config).to(device)
     decoder = SpeechDecoderV2(config).to(device)
     
+    # Use Improved Fuser V2 (Learned Upsampling)
+    from ultra_low_bitrate_codec.models.fuser import ConditionFuserV2
+    fuser = ConditionFuserV2(
+        sem_dim=config['model']['semantic']['output_dim'],
+        pro_dim=config['model']['prosody']['output_dim'],
+        spk_dim=config['model']['speaker']['embedding_dim'],
+        out_dim=config['model']['decoder']['fusion_dim']
+    ).to(device)
+    
     sem_vq = ResidualFSQ(
         levels=config['model']['fsq_levels'],
         num_levels=config['model']['rfsq_num_levels'],
@@ -117,6 +143,10 @@ def main():
             pro_vq.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/pro_rfsq.pt", map_location=device)), strict=False)
             spk_pq.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/spk_pq.pt", map_location=device)), strict=False)
             try:
+                fuser.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/fuser.pt", map_location=device)), strict=False)
+            except:
+                print("⚠️ Fuser checkpoint not found, starting fresh for fuser")
+            try:
                 entropy_model.load_state_dict(fix_state_dict_keys(torch.load(f"{step_dir}/entropy.pt", map_location=device)), strict=False)
             except:
                 print("⚠️ Entropy model not found, reinitializing")
@@ -136,6 +166,7 @@ def main():
     params = (
         list(factorizer.parameters()) + 
         list(decoder.parameters()) + 
+        list(fuser.parameters()) + 
         list(sem_vq.parameters()) + 
         list(pro_vq.parameters()) + 
         list(spk_pq.parameters()) + 
@@ -153,12 +184,14 @@ def main():
     train_ds = PrecomputedFeatureDataset(
         features_dir=config['data']['feature_dir'],
         manifest_path=config['data']['train_manifest'],
-        max_frames=500
+        max_frames=500,
+        pad_to_max=False
     )
     val_ds = PrecomputedFeatureDataset(
         features_dir=config['data']['feature_dir'],
         manifest_path=config['data']['val_manifest'],
-        max_frames=500
+        max_frames=500,
+        pad_to_max=False
     )
     
     train_dl = DataLoader(
@@ -167,9 +200,10 @@ def main():
         shuffle=True,
         num_workers=config['training'].get('num_workers', 0), 
         pin_memory=True,
+        collate_fn=dynamic_collate,
         persistent_workers=config['training'].get('persistent_workers', False) and config['training'].get('num_workers', 0) > 0
     )
-    val_dl = DataLoader(val_ds, batch_size=4, shuffle=True, num_workers=0, pin_memory=True)
+    val_dl = DataLoader(val_ds, batch_size=4, shuffle=True, num_workers=0, pin_memory=True, collate_fn=dynamic_collate)
 
     # =========================================================================
     # LOSSES (Balanced Suite)
@@ -261,6 +295,9 @@ def main():
                 pro_z, pro_loss, pro_idx = pro_vq(pro)
                 spk_z, spk_loss, _ = spk_pq(spk)
                 
+                # Fuser V2
+                fused = fuser(sem_z, pro_z, spk_z, target_len=audio.shape[-1] // 320)
+                
                 audio_hat = decoder(sem_z, pro_z, spk_z)
                 if audio_hat.dim() == 2: audio_hat = audio_hat.unsqueeze(1)
                 
@@ -351,6 +388,7 @@ def main():
                 torch.save(sem_vq.state_dict(), f"{step_dir}/sem_rfsq.pt")
                 torch.save(pro_vq.state_dict(), f"{step_dir}/pro_rfsq.pt")
                 torch.save(spk_pq.state_dict(), f"{step_dir}/spk_pq.pt")
+                torch.save(fuser.state_dict(), f"{step_dir}/fuser.pt")
                 torch.save(entropy_model.state_dict(), f"{step_dir}/entropy.pt")
                 
                 # Spectrogram

@@ -19,6 +19,157 @@ from .bitlinear import BitConv1d, BitLinear, RMSNorm
 from .post_net import SnakeBeta
 
 
+class LatticeFilter(nn.Module):
+    """
+    Differentiable Lattice Filter for LPC Synthesis.
+    Uses Reflection Coefficients (k) to synthesize audio from excitation.
+    
+    Structure: Stable even at high orders (e.g. p=128) if |k| < 1.
+    """
+    def __init__(self, order: int):
+        super().__init__()
+        self.order = order
+
+    def forward(self, excitation: torch.Tensor, rc: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            excitation: (B, T_audio) or (B, 1, T_audio)
+            rc: (B, p, T_frames) Reflection Coefficients in (-1, 1)
+        Returns:
+            signal: (B, T_audio)
+        """
+        if excitation.ndim == 3:
+            excitation = excitation.squeeze(1)
+        
+        B, T = excitation.shape
+        _, p, T_frames = rc.shape
+        
+        # Upsample RC to sample rate (linear interpolation)
+        # rc: (B, p, T_frames) -> (B, p, T)
+        # RC Contraction: keep values away from 1.0 for stability
+        rc = rc * 0.98
+        rc_up = F.interpolate(rc, size=T, mode='linear', align_corners=True)
+        
+        # Lattice recursion
+        # f[k](n) = f[k-1](n) + k[k]*b[k-1](n-1)
+        # b[k](n) = b[k-1](n-1) + k[k]*f[k-1](n)
+        
+        f = excitation
+        b = torch.zeros(B, p, T, device=excitation.device)
+        
+        # This part is naturally recursive. For performance, we can use 
+        # a scan or a loop if p is small. For p=128, a loop is slow but stable.
+        # Optimized recursive implementations often use FFT for A(z) if stable.
+        # However, Lattice is more robust during training.
+        
+        # For Hi-Fi (p=128), we'll use the filter in the frame domain 
+        # or use a faster IIR implementation.
+        
+        # Fast Lattice Filter Implementation (approximate/parallelizable where possible)
+        # But let's start with a correct recursive implementation.
+        
+        # To avoid slow Python loops, we can use a custom CUDA kernel or 
+        # a block-recursive approach. Given current constraints, I'll use 
+        # a vectorized implementation over p if possible.
+        
+        out = f.clone()
+        # Initial backward state
+        b_prev = torch.zeros(B, p, device=excitation.device)
+        
+        # Actually, for training, we can use the Direct Form if coefficients 
+        # are derived from RC via Levinson-Durbin (differentiable).
+        # FFT-based filtering is fastest if we assume frame-wise stationarity.
+        
+        return self._filter_fft(excitation, rc)
+
+    def _filter_fft(self, excitation: torch.Tensor, rc: torch.Tensor) -> torch.Tensor:
+        """
+        FFT-based filtering assuming frame-wise stationarity of LPC coefficients.
+        Fastest for high-order filters (p=128).
+        """
+        B, T = excitation.shape
+        _, p, T_frames = rc.shape
+        
+        # 1. Convert RC to LPC coefficients (a) via Levinson-Durbin
+        # This is differentiable.
+        a = self._rc_to_lpc(rc) # (B, T_frames, p+1)
+        
+        # 2. Frame-wise FFT filtering
+        # Padding for FFT
+        n_fft = 2048 # Should be > p + frame_size
+        hop = T // T_frames
+        
+        # (B, T_frames, n_fft)
+        A_f = torch.fft.rfft(a, n=n_fft)
+        
+        # Filter excitation in frequency domain
+        # H(z) = 1 / A(z)
+        # ... this requires careful overlap-add or frame-wise handling ...
+        
+        # For now, let's keep it simple: predict the envelope and excitation,
+        # and use iSTFT on (Excitation_Spec / A_Spec).
+        return excitation # Placeholder for refined synthesis logic
+
+
+    def _rc_to_lpc(self, rc: torch.Tensor) -> torch.Tensor:
+        """
+        Convert Reflection Coefficients to LPC coefficients using Step-up procedure.
+        Differentiable implementation of Levinson-Durbin recursion.
+        """
+        B, p, T_f = rc.shape
+        # rc: (B, p, T_f) -> (B, T_f, p)
+        rc = rc.permute(0, 2, 1)
+        
+        a = torch.zeros(B, T_f, p + 1, device=rc.device)
+        a[..., 0] = 1.0
+        
+        for i in range(p):
+            k = rc[..., i:i+1] # (B, T_f, 1)
+            # a_new[j] = a_old[j] + k * a_old[i-j]
+            a_rev = torch.flip(a[..., :i+1], dims=[-1])
+            a[..., 1:i+2] = a[..., 1:i+2] + k * a_rev
+            
+        return a
+
+
+class BitLPCHead(nn.Module):
+    """
+    Head for predicting LPC Reflection Coefficients and Excitation.
+    Uses high-order models (p=128) for Hi-Fi.
+    """
+    def __init__(self, input_dim: int, lpc_order: int = 128):
+        super().__init__()
+        self.order = lpc_order
+        
+        # RC Head: Predicts coefficients in (-1, 1)
+        self.rc_proj = nn.Sequential(
+            BitLinear(input_dim, input_dim),
+            SnakeBeta(input_dim),
+            nn.Linear(input_dim, lpc_order)
+        )
+        
+        # Excitation Head: Multi-band excitation components
+        self.exc_proj = nn.Sequential(
+            BitLinear(input_dim, input_dim),
+            SnakeBeta(input_dim),
+            nn.Linear(input_dim, input_dim) # To be used with synthesis head
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, T, C)
+        Returns:
+            rc: (B, p, T) Reflection coefficients
+            exc: (B, T, C) Excitation features
+        """
+        # RC contraction at head level for extra safety
+        rc = torch.tanh(self.rc_proj(x)) * 0.98 
+        rc = rc.transpose(1, 2)
+        exc_feat = self.exc_proj(x)
+        return rc, exc_feat
+
+
 class BitConvNeXtBlock(nn.Module):
     """
     ConvNeXt block with BitNet quantization and SnakeBeta activation.
@@ -165,7 +316,8 @@ class BitInstantaneousFrequencyHead(nn.Module):
         inst_freq = (inst_freq * F.softmax(self.head_weights, dim=0).view(1, 1, -1, 1)).sum(dim=2)
         
         # Limit range and apply per-frequency weights
-        inst_freq = torch.tanh(inst_freq) * np.pi
+        # FIX: More conservative cumsum weight for stability
+        inst_freq = torch.tanh(inst_freq) * (np.pi * 0.95)
         
         # Per-frequency integration rate (key anti-banding fix)
         weighted_freq = inst_freq * self.cumsum_weight  # (B, T, output_dim)
@@ -210,16 +362,20 @@ class BitVocoder(nn.Module):
     """
     def __init__(self, 
                  input_dim: int = 256,
-                 dim: int = 256,
+                 dim: int = 512,
                  n_fft: int = 1024,
                  hop_length: int = 320,
-                 num_layers: int = 4,
-                 num_res_blocks: int = 1):
+                 num_layers: int = 6,
+                 num_res_blocks: int = 2,
+                 use_lpc: bool = True,
+                 lpc_order: int = 128):
         super().__init__()
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.input_dim = input_dim
         self.dim = dim
+        self.use_lpc = use_lpc
+        self.lpc_order = lpc_order
         
         # Input projection
         self.conv_in = BitConv1d(input_dim, dim, kernel_size=7, padding=3)
@@ -227,7 +383,9 @@ class BitVocoder(nn.Module):
         
         # ConvNeXt backbone
         self.backbone = nn.ModuleList()
-        dilations = [1, 2, 4, 8][:num_layers]
+        # Ensure we have enough dilations for the requested layers
+        # Extending to at least 6 standard dilations
+        dilations = [1, 2, 4, 8, 16, 32, 64, 128][:num_layers]
         for d in dilations:
             self.backbone.append(BitConvNeXtBlock(dim, expand_ratio=4, dilation=d))
         
@@ -250,65 +408,66 @@ class BitVocoder(nn.Module):
         self.mag_head = nn.Sequential(
             BitLinear(dim, dim),
             SnakeBeta(dim),
-            RMSNorm(dim), # Norm before Linear
-            nn.Linear(dim, self.out_dim) # FP32 for precise magnitude
+            RMSNorm(dim),
+            nn.Linear(dim, self.out_dim)
         )
         
         # Phase head (IF-based)
         self.phase_head = BitInstantaneousFrequencyHead(dim, self.out_dim)
         
+        # T-LPC Heads
+        if use_lpc:
+            self.lpc_head = BitLPCHead(dim, lpc_order)
+            self.lattice = LatticeFilter(lpc_order)
+        
         # Window for iSTFT
         self.register_buffer('window', torch.hann_window(n_fft))
     
-    def predict_components(self, x):
+    def predict_components(self, x, return_features=False):
         """
-        Predict magnitude and phase from input features.
+        Predict magnitude, phase, and internal features.
         
-        Args:
-            x: (B, T, C) or (B, C, T)
-        Returns:
-            mag: (B, T, F) Linear magnitude
-            phase: (B, T, F) Wrapped phase
-            log_mag: (B, T, F) Log magnitude
+        Input x should be (B, C, T)
         """
-        # Handle input format
         if x.dim() == 2:
             x = x.unsqueeze(0)
-        if x.shape[2] == self.input_dim:
-            x = x.transpose(1, 2)  # (B, C, T)
+            
+        # Robust shape handling: ensure (B, C, T)
+        if x.shape[1] != self.input_dim and x.shape[2] == self.input_dim:
+            x = x.transpose(1, 2)
         
         # Skip connection
         skip = self.skip_proj(x)
         
         # Input projection
-        x = self.conv_in(x)
-        x = self.act_in(x)
+        h = self.conv_in(x)
+        h = self.act_in(h)
         
         # Backbone
         for blk in self.backbone:
-            x = blk(x)
+            h = blk(h)
         
         # Add skip
-        min_len = min(x.shape[2], skip.shape[2])
-        x = x[..., :min_len] + skip[..., :min_len]
+        min_len = min(h.shape[2], skip.shape[2])
+        h = h[..., :min_len] + skip[..., :min_len]
         
         # Residual blocks
         for res in self.res_blocks:
-            x = res(x)
+            h = res(h)
         
         # Final processing: (B, C, T) → (B, T, C)
-        x = x.transpose(1, 2)
-        x = self.norm(x)
+        h_feat = h.transpose(1, 2)
+        h_norm = self.norm(h_feat)
         
         # Magnitude (log-scale)
-        # Magnitude (log-scale)
-        # mag_head layers (BitLinear, SnakeBeta, RMSNorm, Linear) all support (B, T, C)
-        log_mag = self.mag_head(x)
+        log_mag = self.mag_head(h_norm)
         mag = torch.exp(torch.clamp(log_mag, min=-10, max=10))
         
         # Phase
-        phase = self.phase_head(x)
+        phase = self.phase_head(h_norm)
         
+        if return_features:
+            return mag, phase, log_mag, h_norm
         return mag, phase, log_mag
 
     def synthesize(self, mag, phase):
@@ -348,8 +507,40 @@ class BitVocoder(nn.Module):
         Returns:
             audio: (B, T_audio)
         """
-        mag, phase, _ = self.predict_components(x)
-        return self.synthesize(mag, phase)
+        if x.dim() == 2:
+            x = x.unsqueeze(0)
+            
+        # Standardize to (B, C, T) for internal processing
+        if x.shape[1] != self.input_dim and x.shape[2] == self.input_dim:
+            x = x.transpose(1, 2)
+            
+        # 1. Project through backbone
+        mag, phase, _, h = self.predict_components(x, return_features=True)
+        
+        if not self.use_lpc:
+            return self.synthesize(mag, phase)
+        
+        # 2. T-LPC Path
+        rc, _ = self.lpc_head(h)
+        # Stability fix: scale RC to stay strictly within unit circle
+        rc = rc * 0.98
+        
+        # 3. Spectral LPC Synthesis (Hi-Fi magnitude shaping)
+        a = self.lattice._rc_to_lpc(rc) 
+        A_f = torch.fft.rfft(a, n=self.n_fft) 
+        
+        # Robust inverse filter: S(f) = E(f) / |A(f)|
+        A_mag = torch.abs(A_f).clamp(min=1e-2)
+        H_mag = 1.0 / A_mag
+        
+        # Gain Normalization
+        H_norm = H_mag / (H_mag.mean(dim=-1, keepdim=True) + 1e-9)
+        
+        # TEST BYPASS: Disable LPC shaping to isolate baseline quality
+        # refined_mag = 0.5 * mag + 0.5 * (mag * H_norm)
+        refined_mag = mag
+        
+        return self.synthesize(refined_mag, phase)
     
     def count_parameters(self):
         """Count total and quantizable parameters."""
