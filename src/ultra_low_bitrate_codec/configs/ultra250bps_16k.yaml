@@ -1,0 +1,63 @@
+# Ultra-Low Bitrate V8 (~250 bps) - Improved Capacity
+# 16kHz sample rate, tiered quantization
+
+model:
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  cnn_dim: 384
+  
+  # =========================================
+  # QUANTIZERS - Tiered Strategy
+  # =========================================
+  quantizer_type: "rfsq"
+  
+  # Semantic (Content): 25Hz (50Hz / 2) | FSQ [6,6,10,10] (3600 codes ≈ 11.82 bits)
+  # 25 * 11.82 = 295.5 bps
+  fsq_levels: [6, 6, 10, 10] 
+  rfsq_num_levels: 1
+  
+  semantic:
+    input_dim: 768
+    hidden_dim: 320  # Increased from 256
+    output_dim: 4 
+    temporal_compression: 2 
+    vocab_size: 3600  # Updated for new FSQ levels
+    
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 2 
+    temporal_compression: 10 # 50Hz / 10 = 5Hz
+    vocab_size: 16 # FSQ [4, 4]
+    
+  speaker:
+    embedding_dim: 256 
+    quantized: true
+    fsq_levels: [8, 8, 8, 8] # 12 bits header
+    
+  decoder:
+    fusion_dim: 768    
+    cond_dim: 262
+    fusion_heads: 8
+    fusion_layers: 6
+    dropout: 0.1
+         
+  vocoder:
+    type: "bitvocos"
+    dim: 768           
+    num_convnext_layers: 12
+    num_res_blocks: 4
+    sample_rate: 16000
+    hop_length: 640 # Matches 25Hz Semantic grid for simplicity
+
+training:
+  batch_size: 32
+  learning_rate: 3e-5  # Reduced from 1e-4
+  warmup_steps: 1000
+  
+audio:
+  sample_rate: 16000
+  hop_length: 320 # Mel hop (50Hz) to match HuBERT
+  n_fft: 1024
+  n_mels: 80

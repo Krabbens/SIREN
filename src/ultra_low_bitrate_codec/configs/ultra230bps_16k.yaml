@@ -1,0 +1,105 @@
+# V8 VQ-VAE fallback: ~230 bps nominal streaming (sem+pro FSQ) vs ultra58bps_16k (~110 bps).
+# Use when FSQ collapse / recon–quant balance is stubborn at the narrower bottleneck.
+#
+# Model matches ultra200bps_16k.yaml (25 Hz semantic grid, FSQ [6,6,4,4] → 576 codes;
+# prosody 5 Hz, [4,4] → 16 codes). Training block matches ultra58bps_16k (noise, spread,
+# latent diversity, batch_gram_logdet) — retune weights after a few epochs if needed.
+#
+# Nominal (uniform codes):
+#   Semantic:  25 Hz × log2(6×6×4×4) ≈ 25 × 9.17 ≈ 229 bps
+#   Prosody:   5 Hz × log2(16) ≈ 5 × 4 = 20 bps
+#   Speaker (per utterance, amortized): log2(8^4) = 12 bits — same as ultra58
+#
+# Train (separate output_dir — architecture differs from ultra58 checkpoints):
+#   .venv/bin/python scripts/train_v8_vqvae.py \\
+#     --config src/ultra_low_bitrate_codec/configs/ultra230bps_16k.yaml \\
+#     --data_dir data/waves_recovered_16k --epochs 120 \\
+#     --output_dir checkpoints/bit_diffusion_v8_vqvae_ultra230_from0
+
+model:
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  cnn_dim: 384
+
+  quantizer_type: "rfsq"
+  fsq_levels: [6, 6, 4, 4]
+  rfsq_num_levels: 1
+
+  semantic:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 4
+    temporal_compression: 2
+    vocab_size: 576
+
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 2
+    temporal_compression: 10
+    vocab_size: 16
+
+  speaker:
+    embedding_dim: 256
+    quantized: true
+    fsq_levels: [8, 8, 8, 8]
+
+  decoder:
+    fusion_dim: 768
+    cond_dim: 262
+    fusion_heads: 8
+    fusion_layers: 6
+    dropout: 0.1
+
+  vocoder:
+    type: "bitvocos"
+    dim: 768
+    num_convnext_layers: 12
+    num_res_blocks: 4
+    sample_rate: 16000
+    hop_length: 640
+
+training:
+  batch_size: 32
+  learning_rate: 1e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  grad_clip: 0.5
+  recon_weight: 0.14
+  quant_loss_weight: 4.55
+  quant_loss_sem_weight: 92.0
+  quant_loss_pro_weight: 86.0
+  quant_loss_spk_weight: 58.0
+  fsq_input_scale: 2.5
+  fsq_sem_input_scale: 2.95
+  fsq_pro_input_scale: 4.15
+  fsq_input_noise_std: 0.22
+  fsq_sem_noise_std: 0.14
+  fsq_pro_noise_std: 0.26
+  fsq_spk_noise_std: 0.24
+  spread_weight: 0.68
+  spread_floor: 0.04
+  spk_spread_weight: 0.62
+  spk_spread_floor: 0.055
+  latent_diversity_weight: 0.0
+  latent_diversity_sem_weight: 0.36
+  latent_diversity_pro_weight: 0.42
+  latent_diversity_sem_cap: 0.5
+  latent_diversity_pro_cap: 0.26
+  batch_gram_logdet_eps: 0.001
+  batch_gram_logdet_sem_weight: 0.022
+  batch_gram_logdet_pro_weight: 0.022
+  batch_gram_logdet_spk_weight: 0.035
+  num_workers: 4
+  prefetch_factor: 2
+  amp: true
+  grad_accum_steps: 1
+  cudnn_benchmark: true
+  stats_batches: 16
+
+audio:
+  sample_rate: 16000
+  hop_length: 320
+  n_fft: 1024
+  n_mels: 80

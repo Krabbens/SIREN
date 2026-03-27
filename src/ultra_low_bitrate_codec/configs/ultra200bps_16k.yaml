@@ -1,0 +1,85 @@
+# Ultra-Low Bitrate V8 (~250 bps)
+# 16kHz sample rate, tiered quantization
+
+model:
+  hubert_model: "facebook/hubert-base-ls960"
+  hubert_layer: 9
+  freeze_hubert: true
+  cnn_dim: 384
+  
+  # =========================================
+  # QUANTIZERS - Tiered Strategy
+  # =========================================
+  quantizer_type: "rfsq"
+  
+  # Semantic (Content): 25Hz (50Hz / 2) | FSQ [6,6,4,4] (576 codes ≈ 9.17 bits)
+  # 25 * 9.17 = 229.25 bps
+  fsq_levels: [6, 6, 4, 4] 
+  rfsq_num_levels: 1
+  
+  semantic:
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 4 
+    temporal_compression: 2 
+    vocab_size: 576
+    
+  prosody:
+    input_dim: 768
+    hidden_dim: 128
+    output_dim: 2 
+    temporal_compression: 10 # 50Hz / 10 = 5Hz
+    vocab_size: 16 # FSQ [4, 4]
+    
+  speaker:
+    embedding_dim: 256 
+    quantized: true
+    fsq_levels: [8, 8, 8, 8] # 12 bits header
+    
+  decoder:
+    fusion_dim: 768    
+    cond_dim: 262
+    fusion_heads: 8
+    fusion_layers: 6
+    dropout: 0.1
+        
+  vocoder:
+    type: "bitvocos"
+    dim: 768           
+    num_convnext_layers: 12
+    num_res_blocks: 4
+    sample_rate: 16000
+    hop_length: 640 # Matches 25Hz Semantic grid for simplicity
+
+training:
+  batch_size: 32
+  learning_rate: 1e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  grad_clip: 0.5
+  recon_weight: 0.55
+  quant_loss_weight: 0.55
+  quant_loss_sem_weight: 18.0
+  quant_loss_pro_weight: 6.0
+  quant_loss_spk_weight: 6.0
+  fsq_input_scale: 2.5
+  fsq_input_noise_std: 0.12
+  spread_weight: 0.28
+  spread_floor: 0.032
+  latent_diversity_weight: 0.0
+  latent_diversity_sem_weight: 0.09
+  latent_diversity_pro_weight: 0.02
+  latent_diversity_sem_cap: 0.42
+  latent_diversity_pro_cap: 0.12
+  num_workers: 4
+  prefetch_factor: 2
+  amp: true
+  grad_accum_steps: 1
+  cudnn_benchmark: true
+  stats_batches: 16
+
+audio:
+  sample_rate: 16000
+  hop_length: 320 # Mel hop (50Hz) to match HuBERT
+  n_fft: 1024
+  n_mels: 80
